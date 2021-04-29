@@ -1,3 +1,10 @@
+import os
+# device 0 works fine on my machine as it's a 1070
+# device 1 does not (3060 TI)
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["RCALL_LOGDIR"] = "tmp/ppg"
+
 import argparse
 from mpi4py import MPI
 from . import ppg
@@ -27,7 +34,7 @@ def train_fn(env_name="coinrun",
     n_pi=32,
     beta_clone=1.0,
     vf_true_weight=1.0,
-    log_dir='/tmp/ppg',
+    log_dir='./',
     comm=None):
     if comm is None:
         comm = MPI.COMM_WORLD

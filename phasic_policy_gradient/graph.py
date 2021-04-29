@@ -44,7 +44,7 @@ def main_pcg_sample_entry(experiment_name, normalize_and_reduce):
     x_label = 'Timesteps (M)'
 
     if experiment_name == 'ppo':
-        kwargs['csv_file_groups'] = [[f'ppo-run{x}' for x in range(3)]]
+        kwargs['csv_file_groups'] = [[f'ppo-run{x}' for x in range(1)]] # stub was 3
     elif experiment_name == 'ppg':
         kwargs['csv_file_groups'] = [[f'ppg-run{x}' for x in range(3)]]
     elif experiment_name == 'e_pi':
