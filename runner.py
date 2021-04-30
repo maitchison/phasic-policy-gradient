@@ -58,7 +58,10 @@ class Job():
 
         args = " ".join(f"--{k} {v}" for k, v in self.args.items())
 
-        command_str = f"mpiexec -np {workers} python train.py {self.job_name} --device '{device}' {args}"
+        if workers == 1:
+            command_str = f"python train.py {self.job_name} --device '{device}' {args}"
+        else:
+            command_str = f"mpiexec -np {workers} python train.py {self.job_name} --device '{device}' {args}"
         print(f"Running: {command_str}")
         os.system(command_str)
 
