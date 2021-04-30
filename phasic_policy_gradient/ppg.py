@@ -182,7 +182,7 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
     needed_keys = {"ob", "first", "state_in", "oldpd"}.union(model.aux_keys())
     segs = [{k: seg[k] for k in needed_keys} for seg in segs]
     counter = 0
-    for mb in make_minibatches(segs, mbsize):
+    for mini_batch_data in make_minibatches(segs, mbsize):
 
         # # stub: check size
         # print(f"Running MB [{counter:04d}] of size {len(mb['ob'])} {mb['ob'].shape}", flush=True)
@@ -192,21 +192,29 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
         #     pickle.dump(mb['ob'][0], f)
         # exit()
 
-        mb = tree_map(lambda x: x.to(tu.dev()), mb)
-        pd, _, aux, _state_out = model(mb["ob"], mb["first"], mb["state_in"])
-        name2loss = {}
-        name2loss["pol_distance"] = td.kl_divergence(mb["oldpd"], pd).mean()
-        name2loss.update(model.compute_aux_loss(aux, mb))
-        assert set(name2coef.keys()).issubset(name2loss.keys())
-        loss = 0
-        for name in name2loss.keys():
-            unscaled_loss = name2loss[name]
-            scaled_loss = unscaled_loss * name2coef.get(name, 1)
-            logger.logkv_mean("unscaled/" + name, unscaled_loss)
-            logger.logkv_mean("scaled/" + name, scaled_loss)
-            loss += scaled_loss
+        N_MICRO_BATCHES = 8
         opt.zero_grad()
-        loss.backward()
+
+        for micro_batch in range(N_MICRO_BATCHES):
+            # upload data to correct device
+            micro_batch_data = tree_map(lambda x: tu.split_and_upload(x, micro_batch, N_MICRO_BATCHES), mini_batch_data)
+
+            pd, _, aux, _state_out = model(micro_batch_data["ob"], micro_batch_data["first"], micro_batch_data["state_in"])
+            name2loss = {}
+            name2loss["pol_distance"] = td.kl_divergence(micro_batch_data["oldpd"], pd).mean()
+            name2loss.update(model.compute_aux_loss(aux, micro_batch_data))
+            assert set(name2coef.keys()).issubset(name2loss.keys())
+            loss = 0
+            for name in name2loss.keys():
+                unscaled_loss = name2loss[name]
+                scaled_loss = unscaled_loss * name2coef.get(name, 1)
+                logger.logkv_mean("unscaled/" + name, unscaled_loss)
+                logger.logkv_mean("scaled/" + name, scaled_loss)
+                loss += scaled_loss
+            opt.zero_grad()
+            loss = loss / N_MICRO_BATCHES
+            loss.backward()
+
         tu.sync_grads(model.parameters())
         opt.step()
         counter += 1

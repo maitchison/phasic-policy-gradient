@@ -57,19 +57,6 @@ def minibatch_optimize(
     ldp = LossDictPrinter()
     epoch_dicts = []
 
-    # this is the original non-microbatched version
-    # for _ in range(nepoch):
-    #     mb_dicts = [
-    #         train_fn(**mb) for mb in minibatch_gen(tensordict, nminibatch=nminibatch)
-    #     ]
-    #     local_dict = {k: float(v) for (k, v) in dict_mean(mb_dicts).items()}
-    #     if epoch_fn is not None:
-    #         local_dict.update(dict_mean(epoch_fn()))
-    #     global_dict = dict_mean(comm.allgather(local_dict))
-    #     epoch_dicts.append(global_dict)
-    #     if verbose:
-    #         ldp.print_row(global_dict)
-
     for _ in range(nepoch):
         # must keep minibatches on CPU as we want to upload them microbatch at a time
         mb_dicts = [

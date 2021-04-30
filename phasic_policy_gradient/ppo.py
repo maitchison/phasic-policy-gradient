@@ -176,18 +176,14 @@ def learn(
 
         # arrays obs is [B, N, H, W, C]
 
-        N_MICRO_BATCHES = 8
-
+        # this really isn't needed as the mini_batch_size is of size '4' (i.e. 4*nsteps) anyway.
+        N_MICRO_BATCHES = 1
         opt.zero_grad()
+
         for micro_batch in range(N_MICRO_BATCHES):
 
-            def split_and_upload(x:torch.Tensor, split:int, splits:int):
-                assert type(x) is torch.Tensor, f"Input {x} should be a Tensor."
-                assert len(x) % splits == 0, f"Shape of data {x} is {x.shape} but length must divide {splits}"
-                return x[split::splits].to(tu.dev())
-
             # upload data to correct device
-            uploaded_arrays = tree_map(lambda x: split_and_upload(x, micro_batch, N_MICRO_BATCHES), arrays)
+            uploaded_arrays = tree_map(lambda x: tu.split_and_upload(x, micro_batch, N_MICRO_BATCHES), arrays)
 
             losses, diags = compute_losses(
                 model,

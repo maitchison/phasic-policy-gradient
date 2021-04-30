@@ -575,3 +575,8 @@ def _process_modelpath(path, stage_index):
     # if we have a pipelined model, the user should specify a path with stage-0 in the filename
     # replace it with the correct stage
     return path.replace("-stage-0", f"-stage-{stage_index}")
+
+def split_and_upload(x: th.Tensor, split: int, splits: int):
+    assert type(x) is th.Tensor, f"Input {x} should be a Tensor."
+    assert len(x) % splits == 0, f"Shape of data {x} is {x.shape} but length must divide {splits}"
+    return x[split::splits].to(dev())
