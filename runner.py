@@ -47,8 +47,12 @@ class Job():
 
         # 2. execute the job
         os.chdir(experiment_folder)
+
+        workers = device.count(',') + 1
+
         args = " ".join(f"--{k} {v}" for k, v in self.args.items())
-        command_str = f"mpiexec -np 1 python train.py {experiment_folder}/{self.job_name} --device '{device}' {args}"
+
+        command_str = f"mpiexec -np {workers} python train.py {self.job_name} --device '{device}' {args}"
         print(f"Running: {command_str}")
         os.system(command_str)
 

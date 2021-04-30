@@ -9,7 +9,7 @@ def train_fn(env_name="coinrun",
              # 'dual' = separate policy and value networks
              # 'detach' = shared policy and value networks, but with the value function gradient detached during the policy phase to avoid interference
              interacts_total=100_000_000,
-             num_envs=64,
+             num_envs=256,
              n_epoch_pi=1,
              n_epoch_vf=1,
              gamma=.999,
@@ -37,6 +37,10 @@ def train_fn(env_name="coinrun",
         comm = MPI.COMM_WORLD
     tu.setup_dist(comm=comm)
     tu.register_distributions_for_tree_util()
+
+    # we take num_envs as number of environments total, not per worker.
+    assert num_envs % comm.size == 0
+    num_envs //= comm.size
 
     if log_dir is not None:
         format_strs = ['csv', 'stdout'] if comm.Get_rank() == 0 else []
@@ -84,7 +88,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process PPG training arguments.')
     parser.add_argument('run', type=str, default='experiment')
     parser.add_argument('--env_name', type=str, default='coinrun')
-    parser.add_argument('--num_envs', type=int, default=64)
+    parser.add_argument('--num_envs', type=int, default=256)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--n_epoch_pi', type=int, default=1)
     parser.add_argument('--n_epoch_vf', type=int, default=1)
