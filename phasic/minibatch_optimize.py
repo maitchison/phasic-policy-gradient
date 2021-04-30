@@ -109,29 +109,48 @@ def minibatch_gen(data, *, batch_size=None, nminibatch=None, forever=False, devi
     if nminibatch is None:
         nminibatch = max(b // batch_size, 1)
 
+    mb_size = b // nminibatch
+
+    # filter state_in as they have shape (256,0)
+    if "state_in" in data and data["state_in"]["pi"].shape[1] == 0:
+        data = {
+            k: v for k, v in data.items() if k != "state_in"
+        }
+        fake_state = {
+            'pi': th.zeros([mb_size, 0]),
+            'vf': th.zeros([mb_size, 0])
+        }
+    else:
+        fake_state = None
+
+
     while True:
         if MB_SHUFFLE_TIME:
-
-            def merge_down(x):
-                _b, _t, *shape = x.shape
-                assert b == _b and t == _t, f"Expected shape to be ({t}, {b}, *) but found {x.shape}"
-                return x.reshape(b*t, *shape)
-
-            def expand_up(x):
-                bt, *shape = x.shape
-                b_sampled = b // nminibatch
-                assert bt == t*b_sampled, f"Expected shape to be ({t*b_sampled}, *) but found {x.shape}"
-                return x.reshape(b_sampled, t, *shape)
-
-            reshaped_data = tree_map(merge_down, data)
+            reshaped_data = tree_map(lambda x: merge_down(x, b, t), data)
             for mbinds in th.chunk(th.randperm(t*b), nminibatch):
-                yield tree_map(
-                    lambda x: to_device(expand_up(x), device or tu.dev()),
+                result = tree_map(
+                    lambda x: to_device(expand_up(x, mb_size, t), device or tu.dev()),
                     tu.tree_slice(reshaped_data, mbinds)
                 )
-
+                if fake_state is not None:
+                    result['state_in'] = fake_state
+                yield result
         else:
             for mbinds in th.chunk(th.randperm(b), nminibatch):
-                yield tree_map(lambda x: to_device(x, device or tu.dev()), tu.tree_slice(data, mbinds))
+                result = tree_map(lambda x: to_device(x, device or tu.dev()), tu.tree_slice(data, mbinds))
+                if fake_state is not None:
+                    result['state_in'] = fake_state
+                yield result
+
         if not forever:
             return
+
+def merge_down(x, b, t):
+    _b, _t, *shape = x.shape
+    assert b == _b and t == _t, f"Expected shape to be ({t}, {b}, *) but found {x.shape}"
+    return x.reshape(b*t, *shape)
+
+def expand_up(x, b, t):
+    bt, *shape = x.shape
+    assert bt == b*t, f"Expected shape to be ({b*t}, *) but found {x.shape}"
+    return x.reshape(b, t, *shape)

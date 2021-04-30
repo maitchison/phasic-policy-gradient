@@ -1,5 +1,6 @@
 from . import ppo
 from . import logger
+from . import minibatch_optimize as mbo
 import torch as th
 import itertools
 from . import torch_util as tu
@@ -163,15 +164,40 @@ def make_minibatches(segs, mbsize):
     """
     Yield one epoch of minibatch over the dataset described by segs
     Each minibatch mixes data between different segs
+
+    Data in input segemnts should be of shape [n, t]
+    Output will be [mbsize, t]
     """
-    nenv = tu.batch_len(segs[0])
-    nseg = len(segs)
-    envs_segs = th.tensor(list(itertools.product(range(nenv), range(nseg))))
-    for perminds in th.randperm(len(envs_segs)).split(mbsize):
-        esinds = envs_segs[perminds]
-        yield tu.tree_stack(
-            [tu.tree_slice(segs[segind], envind) for (envind, segind) in esinds]
-        )
+    b, t, *state_shape = segs[0]["ob"].shape
+    s = len(segs)
+
+    envs_segs = th.tensor(list(itertools.product(range(b), range(s))))
+
+    # filter state_in as they have shape (256,0)
+    segs = [{k: v for k, v in seg.items() if k != "state_in"} for seg in segs]
+    fake_state = {
+        'pi': th.zeros([mbsize, 0]),
+        'vf': th.zeros([mbsize, 0])
+    }
+
+    if mbo.MB_SHUFFLE_TIME:
+        # not be best work, but it'll do the trick
+        reshaped_segs = tree_map(lambda x: mbo.merge_down(x, b, t), segs)
+        for mbinds in th.randperm(t * b * s).split(mbsize*t):
+            result = tree_map(lambda x: mbo.expand_up(x, mbsize, t),
+            tu.tree_stack(
+                [tu.tree_slice(reshaped_segs[ind % s], ind // s) for ind in mbinds]
+            ))
+            result["state_in"] = fake_state
+            yield result
+    else:
+        for perminds in th.randperm(len(envs_segs)).split(mbsize):
+            esinds = envs_segs[perminds]
+            result = tu.tree_stack(
+                [tu.tree_slice(segs[segind], envind) for (envind, segind) in esinds]
+            )
+            result["state_in"] = fake_state
+            yield result
 
 
 def aux_train(*, model, segs, opt, mbsize, name2coef):

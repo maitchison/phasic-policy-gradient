@@ -70,13 +70,14 @@ class Job():
 
 if __name__ == "__main__":
 
-    JOBS = {
-        'e_aux_0': Job('e_aux', "e_aux=0", DEFAULT_PPO_ARGS, n_aux_epochs=0),
-        'e_aux_1': Job('e_aux', "e_aux=1", DEFAULT_PPO_ARGS, n_aux_epochs=1),
-        'e_aux_3': Job('e_aux', "e_aux=3", DEFAULT_PPO_ARGS, n_aux_epochs=3),
-        'e_aux_6': Job('e_aux', "e_aux=6", DEFAULT_PPO_ARGS, n_aux_epochs=6),
-        'e_aux_ppo': Job('e_aux', "ppo", DEFAULT_PPO_ARGS),
-    }
+    JOBS = [
+        Job('e_aux', "e_aux=0", DEFAULT_PPO_ARGS, n_aux_epochs=0),
+        Job('e_aux', "e_aux=1", DEFAULT_PPO_ARGS, n_aux_epochs=1),
+        Job('e_aux', "e_aux=3", DEFAULT_PPO_ARGS, n_aux_epochs=3),
+        Job('e_aux', "e_aux=6", DEFAULT_PPO_ARGS, n_aux_epochs=6),
+        Job('e_aux', "e_aux=3", DEFAULT_PPO_ARGS, n_aux_epochs=3, shuffle_time=True),
+        Job('e_aux', "ppo", DEFAULT_PPO_ARGS),
+    ]
 
     parser = argparse.ArgumentParser(description='Run a predefined job')
     parser.add_argument('job_name', type=str)
@@ -85,21 +86,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.job_name == "auto":
-
-        while True:
-
-            todo_jobs = [v for k, v in JOBS.items() if not v.is_started()]
-            if len(todo_jobs) == 0:
-                print("All jobs finished.")
-                break
-
+        todo_jobs = [job for job in JOBS if not job.is_started()]
+        if len(todo_jobs) > 0:
             todo_jobs[0].run(device=args.device)
-            # actually just do a single job... we will call this script repeatedly
-            break
     else:
-        key = args.job_name.lower()
-        if key not in JOBS:
-            raise ValueError(f"No job named {args.job_name}, try {list(JOBS.keys())}")
-
-        JOBS[key].run(device=args.device)
+        raise ValueError("Job name must be 'auto'.")
 
