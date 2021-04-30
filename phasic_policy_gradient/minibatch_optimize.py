@@ -1,3 +1,4 @@
+import torch
 import torch as th
 from . import logger
 from .tree_util import tree_map
@@ -55,9 +56,24 @@ def minibatch_optimize(
         nminibatch = ntrain
     ldp = LossDictPrinter()
     epoch_dicts = []
+
+    # this is the original non-microbatched version
+    # for _ in range(nepoch):
+    #     mb_dicts = [
+    #         train_fn(**mb) for mb in minibatch_gen(tensordict, nminibatch=nminibatch)
+    #     ]
+    #     local_dict = {k: float(v) for (k, v) in dict_mean(mb_dicts).items()}
+    #     if epoch_fn is not None:
+    #         local_dict.update(dict_mean(epoch_fn()))
+    #     global_dict = dict_mean(comm.allgather(local_dict))
+    #     epoch_dicts.append(global_dict)
+    #     if verbose:
+    #         ldp.print_row(global_dict)
+
     for _ in range(nepoch):
+        # must keep minibatches on CPU as we want to upload them microbatch at a time
         mb_dicts = [
-            train_fn(**mb) for mb in minibatch_gen(tensordict, nminibatch=nminibatch)
+            train_fn(**mb) for mb in minibatch_gen(tensordict, nminibatch=nminibatch, device="cpu")
         ]
         local_dict = {k: float(v) for (k, v) in dict_mean(mb_dicts).items()}
         if epoch_fn is not None:
@@ -66,6 +82,7 @@ def minibatch_optimize(
         epoch_dicts.append(global_dict)
         if verbose:
             ldp.print_row(global_dict)
+
     return epoch_dicts
 
 
@@ -73,13 +90,20 @@ def dict_mean(ds):
     return {k: sum(d[k] for d in ds) / len(ds) for k in ds[0].keys()}
 
 
-def to_th_device(x):
+def to_th_device(x:torch.Tensor):
+    return to_device(tu.dev())
+
+def to_device(x:torch.Tensor, device):
     assert th.is_tensor(x), "to_th_device should only be applied to torch tensors"
     dtype = th.float32 if x.dtype == th.float64 else None
-    return x.to(tu.dev(), dtype=dtype)
+    return x.to(device, dtype=dtype)
 
 
-def minibatch_gen(data, *, batch_size=None, nminibatch=None, forever=False):
+def minibatch_gen(data, *, batch_size=None, nminibatch=None, forever=False, device=None):
+    """
+    Generator that produces shuffled minibatches delivered to specified device. If device is None then
+    tu.dev() is used as the default.
+    """
     assert (batch_size is None) != (
         nminibatch is None
     ), "only one of batch_size or nminibatch should be specified"
@@ -88,6 +112,6 @@ def minibatch_gen(data, *, batch_size=None, nminibatch=None, forever=False):
         nminibatch = max(ntrain // batch_size, 1)
     while True:
         for mbinds in th.chunk(th.randperm(ntrain), nminibatch):
-            yield tree_map(to_th_device, tu.tree_slice(data, mbinds))
+            yield tree_map(lambda x: to_device(x, device or tu.dev()), tu.tree_slice(data, mbinds))
         if not forever:
             return

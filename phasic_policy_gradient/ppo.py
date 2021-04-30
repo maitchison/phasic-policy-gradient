@@ -3,6 +3,7 @@ Mostly copied from ppo.py but with some extra options added that are relevant to
 """
 
 import numpy as np
+import torch
 import torch as th
 from mpi4py import MPI
 from .tree_util import tree_map
@@ -164,17 +165,43 @@ def learn(
         return default_loss_weights[k] if k in default_loss_weights else 1.0
 
     def train_with_losses_and_opt(loss_keys, opt, **arrays):
-        losses, diags = compute_losses(
-            model,
-            entcoef=entcoef,
-            kl_penalty=kl_penalty,
-            clip_param=clip_param,
-            vfcoef=vfcoef,
-            **arrays,
-        )
-        loss = sum([losses[k] * get_weight(k) for k in loss_keys])
+
+        # # # stub: check size
+        # print(f"Running MB of size {len(arrays['ob'])} {arrays['ob'].shape} {arrays['ob'].dtype}", flush=True)
+        # # # export frame for debuging
+        # import pickle
+        # with open("obs_2.dat", 'wb') as f:
+        #      pickle.dump(arrays['ob'][0].cpu().numpy(), f)
+        # exit()
+
+        # arrays obs is [B, N, H, W, C]
+
+        N_MICRO_BATCHES = 8
+
         opt.zero_grad()
-        loss.backward()
+        for micro_batch in range(N_MICRO_BATCHES):
+
+            def split_and_upload(x:torch.Tensor, split:int, splits:int):
+                assert type(x) is torch.Tensor, f"Input {x} should be a Tensor."
+                assert len(x) % splits == 0, f"Shape of data {x} is {x.shape} but length must divide {splits}"
+                return x[split::splits].to(tu.dev())
+
+            # upload data to correct device
+            uploaded_arrays = tree_map(lambda x: split_and_upload(x, micro_batch, N_MICRO_BATCHES), arrays)
+
+            losses, diags = compute_losses(
+                model,
+                entcoef=entcoef,
+                kl_penalty=kl_penalty,
+                clip_param=clip_param,
+                vfcoef=vfcoef,
+                **uploaded_arrays,
+            )
+            loss = sum([losses[k] * get_weight(k) for k in loss_keys])
+            # because we mean over the batches, we need to divide by micro batch count so that gradient is not scaled.
+            loss = loss / N_MICRO_BATCHES
+            loss.backward()
+
         tu.warn_no_gradient(model, "PPO")
         tu.sync_grads(params, grad_weight=grad_weight)
         diags = {k: v.detach() for (k, v) in diags.items()}

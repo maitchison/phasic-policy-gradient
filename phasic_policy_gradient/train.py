@@ -1,41 +1,38 @@
-import os
-# device 0 works fine on my machine as it's a 1070
-# device 1 does not (3060 TI)
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-os.environ["RCALL_LOGDIR"] = "tmp/ppg"
-
 import argparse
-from mpi4py import MPI
-from . import ppg
-from . import torch_util as tu
-from .impala_cnn import ImpalaEncoder
-from . import logger
-from .envs import get_venv
+
+DEFAULT_LOG_DIR = "./"
 
 def train_fn(env_name="coinrun",
-    distribution_mode="hard",
-    arch="dual",  # 'shared', 'detach', or 'dual'
-    # 'shared' = shared policy and value networks
-    # 'dual' = separate policy and value networks
-    # 'detach' = shared policy and value networks, but with the value function gradient detached during the policy phase to avoid interference
-    interacts_total=100_000_000,
-    num_envs=64,
-    n_epoch_pi=1,
-    n_epoch_vf=1,
-    gamma=.999,
-    aux_lr=5e-4,
-    lr=5e-4,
-    nminibatch=8,
-    aux_mbsize=4,
-    clip_param=.2,
-    kl_penalty=0.0,
-    n_aux_epochs=6,
-    n_pi=32,
-    beta_clone=1.0,
-    vf_true_weight=1.0,
-    log_dir='./',
-    comm=None):
+             distribution_mode="hard",
+             arch="dual",  # 'shared', 'detach', or 'dual'
+             # 'shared' = shared policy and value networks
+             # 'dual' = separate policy and value networks
+             # 'detach' = shared policy and value networks, but with the value function gradient detached during the policy phase to avoid interference
+             interacts_total=100_000_000,
+             num_envs=64,
+             n_epoch_pi=1,
+             n_epoch_vf=1,
+             gamma=.999,
+             aux_lr=5e-4,
+             lr=5e-4,
+             nminibatch=8,
+             aux_mbsize=4,
+             clip_param=.2,
+             kl_penalty=0.0,
+             n_aux_epochs=6,
+             n_pi=32,
+             beta_clone=1.0,
+             vf_true_weight=1.0,
+             log_dir=DEFAULT_LOG_DIR,
+             comm=None):
+
+    from . import ppg
+    from . import torch_util as tu
+    from .impala_cnn import ImpalaEncoder
+    from . import logger
+    from .envs import get_venv
+    from mpi4py import MPI
+
     if comm is None:
         comm = MPI.COMM_WORLD
     tu.setup_dist(comm=comm)
@@ -85,17 +82,34 @@ def train_fn(env_name="coinrun",
 
 def main():
     parser = argparse.ArgumentParser(description='Process PPG training arguments.')
+    parser.add_argument('run', type=str, default='experiment')
     parser.add_argument('--env_name', type=str, default='coinrun')
     parser.add_argument('--num_envs', type=int, default=64)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--n_epoch_pi', type=int, default=1)
     parser.add_argument('--n_epoch_vf', type=int, default=1)
     parser.add_argument('--n_aux_epochs', type=int, default=6)
     parser.add_argument('--n_pi', type=int, default=32)
     parser.add_argument('--clip_param', type=float, default=0.2)
     parser.add_argument('--kl_penalty', type=float, default=0.0)
+    parser.add_argument('--device', type=str, default='auto')
     parser.add_argument('--arch', type=str, default='dual') # 'shared', 'detach', or 'dual'
 
     args = parser.parse_args()
+
+    import os
+
+    # these must be executed before torch import
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+    if args.device == 'auto':
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+
+    os.environ["RCALL_LOGDIR"] = "./"
+
+    from mpi4py import MPI
 
     comm = MPI.COMM_WORLD
 
@@ -105,8 +119,10 @@ def main():
         n_epoch_pi=args.n_epoch_pi,
         n_epoch_vf=args.n_epoch_vf,
         n_aux_epochs=args.n_aux_epochs,
+        interacts_total=int(args.epochs*1e6),
         n_pi=args.n_pi,
         arch=args.arch,
+        log_dir=args.run,
         comm=comm)
 
 if __name__ == '__main__':

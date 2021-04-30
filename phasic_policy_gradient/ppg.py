@@ -181,7 +181,17 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
     """
     needed_keys = {"ob", "first", "state_in", "oldpd"}.union(model.aux_keys())
     segs = [{k: seg[k] for k in needed_keys} for seg in segs]
+    counter = 0
     for mb in make_minibatches(segs, mbsize):
+
+        # # stub: check size
+        # print(f"Running MB [{counter:04d}] of size {len(mb['ob'])} {mb['ob'].shape}", flush=True)
+        # # export frame for debuging
+        # import pickle
+        # with open("obs.dat", 'wb') as f:
+        #     pickle.dump(mb['ob'][0], f)
+        # exit()
+
         mb = tree_map(lambda x: x.to(tu.dev()), mb)
         pd, _, aux, _state_out = model(mb["ob"], mb["first"], mb["state_in"])
         name2loss = {}
@@ -199,6 +209,7 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
         loss.backward()
         tu.sync_grads(model.parameters())
         opt.step()
+        counter += 1
 
 
 def compute_presleep_outputs(
