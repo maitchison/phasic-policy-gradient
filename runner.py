@@ -91,6 +91,8 @@ if __name__ == "__main__":
                 break
 
             todo_jobs[0].run(device=args.device)
+            # actually just do a single job... we will call this script repeatedly
+            break
     else:
         key = args.job_name.lower()
         if key not in JOBS:
