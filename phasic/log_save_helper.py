@@ -29,6 +29,7 @@ class LogSaveHelper:
     def __init__(
         self,
         model: "(nn.Module)",
+        learn_state:dict,
         ic_per_step: "(int) number of iteractions per logging step",
         comm: "(MPI.Comm)" = None,
         ic_per_save: "(int) save only after this many interactions" = 100_000,
@@ -38,6 +39,7 @@ class LogSaveHelper:
         log_new_eps: "(bool) whether to log statistics for new episodes from non-rolling buffer" = False,
     ):
         self.model = model
+        self.learn_state = learn_state
         self.comm = comm or MPI.COMM_WORLD
         self.ic_per_step = ic_per_step
         self.ic_per_save = ic_per_save
@@ -131,7 +133,20 @@ class LogSaveHelper:
         basename += f"{suffix}.jd"
         fname = os.path.join(logger.get_dir(), basename)
         logger.log("Saving to ", fname, f"IC={self.total_interact_count}")
-        th.save(self.model, fname, pickle_protocol=-1)
+
+        save_dict = {
+            'step': self.total_interact_count,
+            'model_state_dict': self.model.state_dict(),
+        }
+
+        for k, v in self.learn_state["opts"].items():
+            save_dict[f"optimizer_{k}"] = v.state_dict()
+
+        if "reward_normalizer" in self.learn_state:
+            save_dict["reward_normalizer"] = self.learn_state["reward_normalizer"]
+
+        th.save(save_dict, fname)
+
         self.save_idx += 1
 
     def _nanmean(self, xs):

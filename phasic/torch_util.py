@@ -178,7 +178,7 @@ def torch_init_process_group(
                 dist.init_process_group(backend=backend, init_method=f"env://")
 
             except RuntimeError as e:
-                logging.log(f"failed with error '{e}', trying again")
+                print(f"failed with error '{e}', trying again")
 
             # We check if we are initialized here because it helps to avoid errors of:
             # "trying to initialize the default process group twice!"

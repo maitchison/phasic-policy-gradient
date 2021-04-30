@@ -141,6 +141,10 @@ class ImpalaCNN(nn.Module):
         self.final_relu = final_relu
 
     def forward(self, x):
+        """
+        Forward input through model, x should be of shape [B, T, *state_shape]
+        """
+
         x = x.to(dtype=th.float32) / self.scale_ob
 
         b, t = x.shape[:-3]

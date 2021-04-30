@@ -23,6 +23,7 @@ def train_fn(env_name="coinrun",
              n_pi=32,
              beta_clone=1.0,
              vf_true_weight=1.0,
+             shuffle_time=False,
              log_dir=DEFAULT_LOG_DIR,
              comm=None):
 
@@ -37,6 +38,8 @@ def train_fn(env_name="coinrun",
         comm = MPI.COMM_WORLD
     tu.setup_dist(comm=comm)
     tu.register_distributions_for_tree_util()
+
+    print(f"World size is {comm.size}")
 
     # we take num_envs as number of environments total, not per worker.
     assert num_envs % comm.size == 0
@@ -97,6 +100,7 @@ def main():
     parser.add_argument('--clip_param', type=float, default=0.2)
     parser.add_argument('--kl_penalty', type=float, default=0.0)
     parser.add_argument('--device', type=str, default='auto')
+    parser.add_argument('--shuffle_time', type=bool, default=False)
     parser.add_argument('--arch', type=str, default='dual') # 'shared', 'detach', or 'dual'
 
     args = parser.parse_args()
@@ -112,13 +116,18 @@ def main():
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
 
     print(f"Set devices to: {os.environ['CUDA_VISIBLE_DEVICES']}")
-
     os.environ["RCALL_LOGDIR"] = "./"
 
-    from mpi4py import MPI
+    # handle shuffle
+    import phasic.minibatch_optimize
+    print(f"Modified shuffle is {args.shuffle_time}")
+    phasic.minibatch_optimize.MB_SHUFFLE_TIME = args.shuffle_time
 
+    # handle MPI
+    from mpi4py import MPI
     comm = MPI.COMM_WORLD
 
+    # train
     train_fn(
         env_name=args.env_name,
         num_envs=args.num_envs,
@@ -129,6 +138,7 @@ def main():
         n_pi=args.n_pi,
         arch=args.arch,
         log_dir=args.run,
+        shuffle_time=args.shuffle_time,
         comm=comm)
 
 if __name__ == '__main__':

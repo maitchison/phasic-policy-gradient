@@ -220,7 +220,14 @@ def learn(
     )
 
     lsh = learn_state.get("lsh") or LogSaveHelper(
-        ic_per_step=ic_per_step, model=model, comm=comm, **log_save_opts
+        ic_per_step=ic_per_step,
+        model=model,
+        learn_state={
+            'opts': opts,
+            'reward_normalizer': reward_normalizer
+        },
+        comm=comm,
+        **log_save_opts
     )
 
     callback_exit = False  # Does callback say to exit loop?

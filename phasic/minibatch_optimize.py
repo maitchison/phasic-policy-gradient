@@ -3,6 +3,7 @@ import torch as th
 from phasic.tree_util import tree_map
 from phasic import torch_util as tu, logger
 
+MB_SHUFFLE_TIME = False
 
 def _fmt_row(width, row, header=False):
     out = " | ".join(_fmt_item(x, width) for x in row)
@@ -49,6 +50,7 @@ def minibatch_optimize(
     comm: "(MPI.Comm) MPI communicator",
     verbose: "(bool) print detailed stats" = False,
     epoch_fn: "function () -> dict to be called each epoch" = None,
+    shuffle_time=False,
 ):
     ntrain = tu.batch_len(tensordict)
     if nminibatch > ntrain:
@@ -80,6 +82,7 @@ def dict_mean(ds):
 def to_th_device(x:torch.Tensor):
     return to_device(tu.dev())
 
+
 def to_device(x:torch.Tensor, device):
     assert th.is_tensor(x), "to_th_device should only be applied to torch tensors"
     dtype = th.float32 if x.dtype == th.float64 else None
@@ -90,15 +93,45 @@ def minibatch_gen(data, *, batch_size=None, nminibatch=None, forever=False, devi
     """
     Generator that produces shuffled minibatches delivered to specified device. If device is None then
     tu.dev() is used as the default.
+
+    Inputs are expected to be of shape [b, t, *]
+
+    If MB_SHUFFLE_TIME is enabled then time dimension (N) is shuffled aswell, but still returns
+    minibatches of shape [b//nminibatch, t, *]
+
     """
     assert (batch_size is None) != (
         nminibatch is None
     ), "only one of batch_size or nminibatch should be specified"
-    ntrain = tu.batch_len(data)
+
+    b, t, *state_shape = data['ob'].shape
+
     if nminibatch is None:
-        nminibatch = max(ntrain // batch_size, 1)
+        nminibatch = max(b // batch_size, 1)
+
     while True:
-        for mbinds in th.chunk(th.randperm(ntrain), nminibatch):
-            yield tree_map(lambda x: to_device(x, device or tu.dev()), tu.tree_slice(data, mbinds))
+        if MB_SHUFFLE_TIME:
+
+            def merge_down(x):
+                _b, _t, *shape = x.shape
+                assert b == _b and t == _t, f"Expected shape to be ({t}, {b}, *) but found {x.shape}"
+                return x.reshape(b*t, *shape)
+
+            def expand_up(x):
+                bt, *shape = x.shape
+                b_sampled = b // nminibatch
+                assert bt == t*b_sampled, f"Expected shape to be ({t*b_sampled}, *) but found {x.shape}"
+                return x.reshape(b_sampled, t, *shape)
+
+            reshaped_data = tree_map(merge_down, data)
+            for mbinds in th.chunk(th.randperm(t*b), nminibatch):
+                yield tree_map(
+                    lambda x: to_device(expand_up(x), device or tu.dev()),
+                    tu.tree_slice(reshaped_data, mbinds)
+                )
+
+        else:
+            for mbinds in th.chunk(th.randperm(b), nminibatch):
+                yield tree_map(lambda x: to_device(x, device or tu.dev()), tu.tree_slice(data, mbinds))
         if not forever:
             return

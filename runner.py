@@ -4,7 +4,7 @@ import argparse
 DEFAULT_PPG_ARGS = {
     'env_name':     'coinrun',
     'num_envs':     256,
-    'epochs':       10,
+    'epochs':       25,
     'n_aux_epochs': 3,
     'n_pi':         16, # save on the memory...
 }
@@ -12,7 +12,7 @@ DEFAULT_PPG_ARGS = {
 DEFAULT_PPO_ARGS = {
     'env_name':     'coinrun',
     'num_envs':     256,
-    'epochs':       10,
+    'epochs':       25,
     'n_epoch_vf':   3,
     'n_epoch_pi':   3,
     'n_aux_epochs': 0,
