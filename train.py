@@ -105,7 +105,9 @@ def main():
     if args.device == 'auto':
         os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
     else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
+
+    print(f"Set devices to: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
     os.environ["RCALL_LOGDIR"] = "./"
 

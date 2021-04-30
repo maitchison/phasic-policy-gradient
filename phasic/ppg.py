@@ -4,7 +4,7 @@ import torch as th
 import itertools
 from . import torch_util as tu
 from torch import distributions as td
-from distr_builder import distr_builder
+from .distr_builder import distr_builder
 from mpi4py import MPI
 from .tree_util import tree_map, tree_reduce
 import operator

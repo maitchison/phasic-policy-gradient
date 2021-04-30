@@ -9,7 +9,7 @@ import torch.distributed as dist
 import torch.distributions as dis
 from mpi4py import MPI
 from torch import nn
-from . import tree_util
+from . import tree_util, logger
 import socket
 import time
 import random
@@ -140,7 +140,7 @@ def torch_init_process_group(
     os.environ["NCCL_NSOCKS_PERTHREAD"] = "2"
     os.environ["NCCL_SOCKET_NTHREADS"] = "8"
     # (clemens) this ordering is faster
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3,2,7,6,4,5"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3,2,7,6,4,5"
     if platform.system() == "Darwin":
         # By default, Gloo will try to resolve the hostname, eventually
         # time out, and then fall back to the local machine.
@@ -178,7 +178,7 @@ def torch_init_process_group(
                 dist.init_process_group(backend=backend, init_method=f"env://")
 
             except RuntimeError as e:
-                _log(f"failed with error '{e}', trying again")
+                logging.log(f"failed with error '{e}', trying again")
 
             # We check if we are initialized here because it helps to avoid errors of:
             # "trying to initialize the default process group twice!"
