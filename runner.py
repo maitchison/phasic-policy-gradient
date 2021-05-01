@@ -79,10 +79,16 @@ if __name__ == "__main__":
         Job('e_aux', "e_aux=3 (ST)", DEFAULT_PPG_ARGS, n_aux_epochs=3, shuffle_time=True),
         Job('e_aux', "ppo", DEFAULT_PPO_ARGS),
 
+        Job('v_trace', "vtrace=on", DEFAULT_PPG_ARGS, vtarget_mode='vtrace', shuffle_time=True),
+        Job('v_trace', "vtrace=off", DEFAULT_PPG_ARGS, vtarget_mode='rollout', shuffle_time=True),
+        Job('v_trace', "vtrace=on (no ST)", DEFAULT_PPG_ARGS, vtarget_mode='vtrace', shuffle_time=False),
+        Job('v_trace_distill', "vtrace=distill", DEFAULT_PPG_ARGS, vtarget_mode='vtrace_distill', shuffle_time=True),
+
+        Job('testing', "2x_loss", DEFAULT_PPG_ARGS, vtarget_mode='vtrace2x', shuffle_time=True),
+        Job('testing', "rollout_pi", DEFAULT_PPG_ARGS, vtarget_mode='rollout_pi', shuffle_time=True),
+        Job('testing', "rollout_vf", DEFAULT_PPG_ARGS, vtarget_mode='rollout_vf', shuffle_time=True),
     ]
 
-    Job('v_trace', "vtrace=off", DEFAULT_PPG_ARGS, shuffle_time=True),
-    Job('v_trace', "vtrace=on", DEFAULT_PPG_ARGS, vtarget_mode='vtrace', shuffle_time=True),
 
 
     parser = argparse.ArgumentParser(description='Run a predefined job')

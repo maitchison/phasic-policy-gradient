@@ -120,17 +120,52 @@ class PhasicValueModel(PhasicModel):
 
     def compute_aux_loss(self, aux, seg):
 
+        aux_scale = 1.0
+        true_scale = 1.0
+
         if self.vtarget_mode == "rollout":
-            vtarg = seg["vtarg"]
+            vtarg_aux = seg["vtarg"]
+            vtarg_tru = seg["vtarg"]
+        elif self.vtarget_mode == "rollout_pi":
+            vtarg_aux = seg["vtarg"]
+            vtarg_tru = None
+        elif self.vtarget_mode == "rollout_vf":
+            vtarg_aux = None
+            vtarg_tru = seg["vtarg"]
         elif self.vtarget_mode == "sleep":
             raise NotImplementedError('sorry, return calculations during sleep phase are not implemented yet.')
         elif self.vtarget_mode == "vtrace":
             assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
-            vtarg = seg["vtarg_vtrace"]
-        return {
-            "vf_aux": 0.5 * ((aux["vpredaux"] - vtarg) ** 2).mean(),
-            "vf_true": 0.5 * ((aux["vpredtrue"] - vtarg) ** 2).mean(),
-        }
+            vtarg_aux = seg["vtarg_vtrace"]
+            vtarg_tru = seg["vtarg_vtrace"]
+        elif self.vtarget_mode == "vtrace2x":
+            assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
+            vtarg_aux = seg["vtarg_vtrace"]
+            vtarg_tru = seg["vtarg_vtrace"]
+            true_scale = 2.0
+            aux_scale = 2.0
+        elif self.vtarget_mode == "vtrace_distill":
+            assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
+            # vtarg_aux = seg["oldvpred"] # this would probably do, but since we have vpredtrue sitting here use that.
+            vtarg_aux = aux["vpredtrue"].detach() # actual distillation
+            vtarg_tru = seg["vtarg_vtrace"]
+        else:
+            raise ValueError(f"invalid vtarget_mode {self.vtarget_mode}")
+
+        result = {}
+        if vtarg_aux is not None:
+            # train pi module
+            result["vf_aux"] = aux_scale * 0.5 * ((aux["vpredaux"] - vtarg_aux) ** 2).mean()
+        else:
+            result["vf_aux"] = 0
+        if vtarg_tru is not None:
+            # train vf module
+            result["vf_true"] = true_scale * 0.5 * ((aux["vpredtrue"] - vtarg_tru) ** 2).mean()
+        else:
+            result["vf_true"] = 0
+
+        return result
+
 
     def reshape_x(self, x):
         b, t = x.shape[:2]
@@ -223,7 +258,7 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
     Train on auxiliary loss + policy KL + vf distance
     """
 
-    optional_keys = {"vtarg_vtrace"}
+    optional_keys = {"vtarg_vtrace", "oldvpred"}
 
     needed_keys = {"ob", "first", "state_in", "oldpd"}.union(model.aux_keys())
     needed_keys = needed_keys.union(set(k for k in optional_keys if k in segs[0]))
@@ -269,15 +304,13 @@ def compute_vtrace_targets(seg, counter, ppo_hps):
     # shift finals back one to get terminal states.
     dones = th.cat([seg['first'][:, 1:], seg['finalfirst'][:, None]], dim=1).float()
 
-
     def transpose_bt(x):
-        return torch.transpose(x, 0, 1)
+        return th.transpose(x, 0, 1)
 
     # this function expects data in t,b format, so we need to swap everything around
     vs, weighted_adv, cs = vtrace.importance_sampling_v_trace(
         behaviour_log_prob=transpose_bt(seg['logp']),
-        target_log_policy=transpose_bt(seg['oldpd'].logits),
-        actions=transpose_bt(seg['ac']),
+        target_log_prob=transpose_bt(seg['oldpd'].log_prob(seg['ac'])),
         rewards=transpose_bt(seg['reward']),
         dones=transpose_bt(dones),
         target_value_estimates=transpose_bt(seg["oldvpred"]),
@@ -289,11 +322,26 @@ def compute_vtrace_targets(seg, counter, ppo_hps):
     seg['vtarg_vtrace'] = transpose_bt(vs)
 
     # show some debug information to make sure everything is ok
-    v_delta = 0.5 * th.mean((seg['vtarg'] - seg['vtarg_vtrace'])**2)
-    print(f"Segment: {counter:02} cs:{cs.mean():.2f} +- {cs.std():.3f},  v_delta:{v_delta:.3f}")
-    logger.logkv_mean(f"vtrace/cs_mean_{counter:02}", cs.mean())
+    # v_roll_delta is how far v-trace value estimates are away from what PPG would normally train on (which are the rollout values)
+    # v_pred_delta is how far v-trace value estimates are away from predictions made at the beginning of the aux_phase
+
+    v_roll_delta = th.mean((seg['vtarg'] - seg['vtarg_vtrace'])**2)
+    v_pred_delta = th.mean((seg['oldvpred'] - seg['vtarg_vtrace']) ** 2)
+    v_diff_max = th.max(th.abs(seg['vtarg'] - seg['vtarg_vtrace']))
+
+    print('Dones:', dones.sum())
+    print('Rewards:', seg["reward"].sum())
+
+    print(f"" + \
+          f"Segment: {counter:02} cs:{cs.mean():.2f} +- {cs.std():.3f}," +
+          f"v_pred_delta:{v_pred_delta:.3f} v_roll_delta:{v_roll_delta:.3f}, "+
+          f"v_diff_max: {v_diff_max:.2f} "
+          )
+    logger.logkv_mean(f"vtrace/cs_mu_{counter:02}", cs.mean())
     logger.logkv_mean(f"vtrace/cs_std_{counter:02}", cs.std())
-    logger.logkv_mean(f"vtrace/v_delta_{counter:02}", v_delta)
+    logger.logkv_mean(f"vtrace/v_roll_delta_{counter:02}", v_roll_delta)
+    logger.logkv_mean(f"vtrace/v_pred_delta_{counter:02}", v_pred_delta)
+    logger.logkv_mean(f"vtrace/v_pred_max_{counter:02}", v_diff_max)
 
 
 def compute_presleep_outputs(
@@ -382,33 +430,3 @@ def learn(
                 )
                 logger.dumpkvs()
             segs.clear()
-
-# remove: just use their version...
-# @th.no_grad()
-#     def batched_forward(obs, first, state_in):
-#         """
-#         Run input through model, and return result.
-#         Data is broken into small batches to avoid high memory usage, and this function always runs without
-#         gradient.
-#
-#         Input should be of shape [b, t, *]
-#         Output will be of shape [b, t, *]
-#         """
-#         # todo make this process more than one rollout at a time (although a batch of 256 is probably fast enough...)
-#         b, t, *state_shape = obs.shape
-#
-#         pds = []
-#         auxs = defaultdict(list)
-#
-#         for i in range(b):
-#             pd, _, aux, _state_out = model(obs[i:i+1], first[i:i+1], tu.tree_slice(state_in, [i]))
-#             pds.append(pd.logits)
-#             for k, v in aux.items():
-#                 auxs[k].append(v)
-#
-#         pds = th.cat(pds, dim=0)
-#         auxs = {
-#             k: th.cat(v, dim=0) for k, v in auxs.items()
-#         }
-#
-#         return pds, auxs

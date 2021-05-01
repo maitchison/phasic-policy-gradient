@@ -88,6 +88,7 @@ def train_fn(env_name="coinrun",
     )
 
 def main():
+
     parser = argparse.ArgumentParser(description='Process PPG training arguments.')
     parser.add_argument('run', type=str, default='experiment')
     parser.add_argument('--env_name', type=str, default='coinrun')
@@ -100,7 +101,7 @@ def main():
     parser.add_argument('--clip_param', type=float, default=0.2)
     parser.add_argument('--kl_penalty', type=float, default=0.0)
     parser.add_argument('--device', type=str, default='auto')
-    parser.add_argument('--vtarget_mode', type=str, default='rollout', help="[rollout|vtrace]")
+    parser.add_argument('--vtarget_mode', type=str, default='rollout', help="[rollout|vtrace|vtrace_distill]")
     parser.add_argument('--shuffle_time', type=bool, default=False)
     parser.add_argument('--arch', type=str, default='dual') # 'shared', 'detach', or 'dual'
 
@@ -125,7 +126,7 @@ def main():
 
     # handle vtrace
     import phasic.ppg
-    phasic.ppg.USE_VTRACE = args.vtarget_mode == "vtrace"
+    phasic.ppg.USE_VTRACE = "vtrace" in args.vtarget_mode
 
     # handle MPI
     from mpi4py import MPI

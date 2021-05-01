@@ -202,6 +202,7 @@ def learn(
         tu.warn_no_gradient(model, "PPO")
         tu.sync_grads(params, grad_weight=grad_weight)
         diags = {k: v.detach() for (k, v) in diags.items()}
+        
         opt.step()
         diags.update({f"loss_{k}": v.detach() for (k, v) in losses.items()})
         return diags
@@ -261,7 +262,6 @@ def learn(
                     nepoch=n_epoch_vf,
                     verbose=verbose,
                 )
-
                 train_fn = train_pi
             else:
                 train_fn = train_pi_and_vf

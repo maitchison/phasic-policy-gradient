@@ -41,7 +41,7 @@ def v_trace_trust_region(behaviour_log_policy, target_log_policy):
     return 1 / (1 + kl)
 
 
-def importance_sampling_v_trace(behaviour_log_prob, target_log_policy, actions, rewards, dones,
+def importance_sampling_v_trace(behaviour_log_prob, target_log_prob, rewards, dones,
                                 target_value_estimates, target_value_final_estimate, gamma, lamb=0.95):
     """
     Calculate importance weights, and value estimates from off-policy data.
@@ -49,7 +49,7 @@ def importance_sampling_v_trace(behaviour_log_prob, target_log_policy, actions, 
     Based on https://arxiv.org/pdf/1802.01561.pdf
     <modifed to use tensors instead of np>
     :param behaviour_log_prob           np array [N, B], the probability of taking the action we did during rollout
-    :param target_log_policy            np array [N, B, A], (i.e. the policy that we want to update)
+    :param target_log_prob              np array [N, B], (i.e. the policy that we want to update evaluated for each action)
     :param actions                      np array [N, B], action taken by behaviour policy at each step
     :param rewards                      np array [N, B], reward received at each step
     :param dones                        np array [N, B], boolean terminals
@@ -65,46 +65,38 @@ def importance_sampling_v_trace(behaviour_log_prob, target_log_policy, actions, 
         cs                              the importance sampling correction adjustments
     """
 
-    N, B, A = target_log_policy.shape
+    N, B = target_log_prob.shape
 
-    vs = th.zeros_like(target_value_estimates)
-    cs = th.zeros_like(target_value_estimates)
+    v_s = th.zeros_like(target_value_estimates)
 
     not_terminal = (1 - dones).to(dtype=th.float32)
 
-    target_log_prob = th.zeros_like(target_value_estimates)
+    c_bar = 1.0
+    rho_bar = 1.0
 
-    # get just the part of the policy we need
-    # stub: there will be a faster way of doing this with indexing..
-    # for i in range(N):
-    #     for j in range(B):
-    #         target_log_policy_actions[i,j] = target_log_policy[i,j,actions[i, j]]
-    #         behaviour_log_policy_actions[i, j] = behaviour_log_policy[i, j, actions[i, j]]
-    for b in range(B):
-        target_log_prob[:, b] = target_log_policy[range(N), b, actions[:, b]]
+    rhos = th.exp(target_log_prob - behaviour_log_prob)
+    clipped_rhos = th.clamp(rhos, 0, rho_bar)
+    c_s = th.clamp(rhos, 0, c_bar)
 
-    rhos = th.clamp(th.exp(target_log_prob - behaviour_log_prob), 0, 1)
+    discounts = gamma * not_terminal
 
+    prev_vs = 0
     for i in reversed(range(N)):
         next_target_value_estimate = target_value_estimates[i + 1] if i + 1 != N else target_value_final_estimate
         # adding an epsilon to the denominator introduce a small amount of bias, this probably would not be necessary
         # if I use logs instead.
-        tdv = rhos[i] * (rewards[i] + gamma * not_terminal[i] * next_target_value_estimate - target_value_estimates[i])
-        cs[i] = rhos[i]  # in the paper these seem to be different, but I have them the same here?
-        next_vs = vs[i + 1] if i + 1 != N else 0
-        vs[i] = tdv + gamma * not_terminal[i] * (lamb * cs[i]) * next_vs
+        tdv = clipped_rhos[i] * (rewards[i] + discounts[i] * next_target_value_estimate - target_value_estimates[i])
+        v_s[i] = tdv + discounts[i] * (lamb * c_s[i]) * prev_vs
+        prev_vs = v_s[i]
 
     # add value estimates back in
-    vs = vs + target_value_estimates
-    vs_plus_one = th.cat([vs[1:], target_value_final_estimate[None, :]], dim=0)
+    v_s = v_s + target_value_estimates
+    vs_plus_one = th.cat([v_s[1:], target_value_final_estimate[None, :]], dim=0)
 
     # calculate advantage estimates
-    weighted_advantages = rhos * (rewards + gamma * not_terminal * vs_plus_one - target_value_estimates)
+    weighted_advantages = rhos * (rewards + discounts * vs_plus_one - target_value_estimates)
 
-    # cast to float because for some reason goes to float64
-    weighted_advantages = weighted_advantages.to(dtype=th.float32)
-
-    return vs, weighted_advantages, cs
+    return v_s, weighted_advantages, c_s
 
 
 def importance_sampling_v_trace_v2(behaviour_log_policy, target_log_policy, actions, rewards, dones,
