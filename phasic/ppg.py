@@ -208,54 +208,30 @@ def make_minibatches(segs, mbsize):
             yield result
 
 
-def aux_train(*, model, segs, opt, mbsize, name2coef, ppo_hps:dict):
+def aux_train(*, model, segs, opt, mbsize, name2coef):
     """
     Train on auxiliary loss + policy KL + vf distance
     """
-
     needed_keys = {"ob", "first", "state_in", "oldpd"}.union(model.aux_keys())
-
-
-    segs = [{k: seg[k] for k in needed_keys if k in seg} for seg in segs]
-
-    counter = 0
-    for mini_batch_data in make_minibatches(segs, mbsize):
-
-        # # stub: check size
-        # print(f"Running MB [{counter:04d}] of size {len(mb['ob'])} {mb['ob'].shape}", flush=True)
-        # # export frame for debuging
-        # import pickle
-        # with open("obs.dat", 'wb') as f:
-        #     pickle.dump(mb['ob'][0], f)
-        # exit()
-
-        # this really isn't needed as the mini_batch_size is of size '4' (i.e. 4*nsteps) anyway.
-        N_MICRO_BATCHES = 1
+    segs = [{k: seg[k] for k in needed_keys} for seg in segs]
+    for mb in make_minibatches(segs, mbsize):
+        mb = tree_map(lambda x: x.to(tu.dev()), mb)
+        pd, _, aux, _state_out = model(mb["ob"], mb["first"], mb["state_in"])
+        name2loss = {}
+        name2loss["pol_distance"] = td.kl_divergence(mb["oldpd"], pd).mean()
+        name2loss.update(model.compute_aux_loss(aux, mb))
+        assert set(name2coef.keys()).issubset(name2loss.keys())
+        loss = 0
+        for name in name2loss.keys():
+            unscaled_loss = name2loss[name]
+            scaled_loss = unscaled_loss * name2coef.get(name, 1)
+            logger.logkv_mean("unscaled/" + name, unscaled_loss)
+            logger.logkv_mean("scaled/" + name, scaled_loss)
+            loss += scaled_loss
         opt.zero_grad()
-
-        for micro_batch in range(N_MICRO_BATCHES):
-            # upload data to correct device
-            micro_batch_data = tree_map(lambda x: tu.split_and_upload(x, micro_batch, N_MICRO_BATCHES), mini_batch_data)
-
-            pd, _, aux, _state_out = model(micro_batch_data["ob"], micro_batch_data["first"], micro_batch_data["state_in"])
-            name2loss = {}
-            name2loss["pol_distance"] = td.kl_divergence(micro_batch_data["oldpd"], pd).mean()
-            name2loss.update(model.compute_aux_loss(aux, micro_batch_data))
-            assert set(name2coef.keys()).issubset(name2loss.keys())
-            loss = 0
-            for name in name2loss.keys():
-                unscaled_loss = name2loss[name]
-                scaled_loss = unscaled_loss * name2coef.get(name, 1)
-                logger.logkv_mean("unscaled/" + name, unscaled_loss)
-                logger.logkv_mean("scaled/" + name, scaled_loss)
-                loss += scaled_loss
-            opt.zero_grad()
-            loss = loss / N_MICRO_BATCHES
-            loss.backward()
-
+        loss.backward()
         tu.sync_grads(model.parameters())
         opt.step()
-        counter += 1
 
 
 def compute_vtrace_targets(seg, counter, ppo_hps):
@@ -278,14 +254,6 @@ def compute_vtrace_targets(seg, counter, ppo_hps):
     # shift finals back one to get terminal states.
     dones = th.cat([seg['first'][:, 1:], seg['finalfirst'][:, None]], dim=1).float()
 
-    # generate (uncorrected) value estimates under current policy (and swap axis)
-    # and also get the current policy for the state aswell
-    # pd, aux = batched_forward(seg["ob"], seg["first"], seg["state_in"])
-
-    # _, aux_final = model(seg["finalob"][:, None], seg["finalfirst"][:, None],
-    #                                tree_map(lambda x: x[:, None], seg["finalstate"])
-    #                                )
-
 
     def transpose_bt(x):
         return torch.transpose(x, 0, 1)
@@ -303,14 +271,11 @@ def compute_vtrace_targets(seg, counter, ppo_hps):
         lamb=ppo_hps["λ"],
     )
 
-    if "old_vtarg" not in seg:
-        # keep this around for debuging purposes
-        seg["old_vtarg"] = seg["vtarg"]
-    seg['vtarg'] = transpose_bt(vs)
+    seg['oldvpred_adjusted'] = transpose_bt(vs)
 
     # show some debug information to make sure everything is ok
-    v_delta = 0.5 * th.mean((seg['vtarg'] - seg['old_vtarg'])**2)
-    print(f"Segment: {counter:02} {cs.mean():.2f} {cs.std():.2f} {v_delta:.2f}")
+    v_delta = 0.5 * th.mean((seg['oldvpred'] - seg['oldvpred_adjusted'])**2)
+    print(f"Segment: {counter:02} cs:{cs.mean():.2f} +- {cs.std():.3f},  v_delta:{v_delta:.3f}")
 
 
 def compute_presleep_outputs(
