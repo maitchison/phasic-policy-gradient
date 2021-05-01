@@ -77,6 +77,7 @@ class PhasicValueModel(PhasicModel):
         obtype,
         actype,
         enc_fn,
+        vtarget_mode="rollout", # [rollout|sleep|vtrace]
         arch="dual",  # shared, detach, dual
     ):
         super().__init__()
@@ -104,6 +105,8 @@ class PhasicValueModel(PhasicModel):
         self.detach_value_head = detach_value_head
         pi_outsize, self.make_distr = distr_builder(actype)
 
+        self.vtarget_mode = vtarget_mode
+
         for k in self.enc_keys:
             self.set_encoder(k, enc_fn(obtype))
 
@@ -116,7 +119,14 @@ class PhasicValueModel(PhasicModel):
         self.aux_vf_head = tu.NormedLinear(lastsize, 1, scale=0.1)
 
     def compute_aux_loss(self, aux, seg):
-        vtarg = seg["vtarg"]
+
+        if self.vtarget_mode == "rollout":
+            vtarg = seg["vtarg"]
+        elif self.vtarget_mode == "sleep":
+            raise NotImplementedError('sorry, return calculations during sleep phase are not implemented yet.')
+        elif self.vtarget_mode == "vtrace":
+            assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
+            vtarg = seg["vtarg_vtrace"]
         return {
             "vf_aux": 0.5 * ((aux["vpredaux"] - vtarg) ** 2).mean(),
             "vf_true": 0.5 * ((aux["vpredtrue"] - vtarg) ** 2).mean(),
@@ -212,7 +222,12 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
     """
     Train on auxiliary loss + policy KL + vf distance
     """
+
+    optional_keys = {"vtarg_vtrace"}
+
     needed_keys = {"ob", "first", "state_in", "oldpd"}.union(model.aux_keys())
+    needed_keys = needed_keys.union(set(k for k in optional_keys if k in segs[0]))
+
     segs = [{k: seg[k] for k in needed_keys} for seg in segs]
     for mb in make_minibatches(segs, mbsize):
         mb = tree_map(lambda x: x.to(tu.dev()), mb)
@@ -271,11 +286,14 @@ def compute_vtrace_targets(seg, counter, ppo_hps):
         lamb=ppo_hps["λ"],
     )
 
-    seg['oldvpred_adjusted'] = transpose_bt(vs)
+    seg['vtarg_vtrace'] = transpose_bt(vs)
 
     # show some debug information to make sure everything is ok
-    v_delta = 0.5 * th.mean((seg['oldvpred'] - seg['oldvpred_adjusted'])**2)
+    v_delta = 0.5 * th.mean((seg['vtarg'] - seg['vtarg_vtrace'])**2)
     print(f"Segment: {counter:02} cs:{cs.mean():.2f} +- {cs.std():.3f},  v_delta:{v_delta:.3f}")
+    logger.logkv_mean(f"vtrace/cs_mean_{counter:02}", cs.mean())
+    logger.logkv_mean(f"vtrace/cs_std_{counter:02}", cs.std())
+    logger.logkv_mean(f"vtrace/v_delta_{counter:02}", v_delta)
 
 
 def compute_presleep_outputs(
@@ -283,7 +301,12 @@ def compute_presleep_outputs(
 ):
     def forward(ob, first, state_in):
         pd, vpred, _aux, _state_out = model.forward(ob.to(tu.dev()), first, state_in)
+        # I bring these back to the cpu so everything in seg is on the same device.
+        # (also saves a bit of GPU ram if we have lots of segments)
+        pd.logits = pd.logits.cpu()
+        vpred = vpred.cpu()
         return pd, vpred
+
 
     for i, seg in enumerate(segs):
         seg[pdkey], seg[vpredkey] = tu.minibatched_call(
@@ -292,7 +315,7 @@ def compute_presleep_outputs(
         if USE_VTRACE:
             # generate the final value estimate
             with th.no_grad():
-                _pd, vpred, _aux, _state_out = model(seg["finalob"][:, None], seg["finalfirst"][:, None], tree_map(lambda x: x[:, None], seg["finalstate"]))
+                pd, vpred = forward(seg["finalob"][:, None], seg["finalfirst"][:, None], tree_map(lambda x: x[:, None], seg["finalstate"]))
             seg["finaloldvpred"] = vpred[:, 0]
 
             compute_vtrace_targets(seg=seg, counter=i, ppo_hps=ppo_hps)
@@ -356,7 +379,6 @@ def learn(
                     opt=aux_state,
                     mbsize=aux_mbsize,
                     name2coef=name2coef,
-                    ppo_hps=ppo_hps,
                 )
                 logger.dumpkvs()
             segs.clear()

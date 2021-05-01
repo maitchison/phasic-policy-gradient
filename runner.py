@@ -78,7 +78,12 @@ if __name__ == "__main__":
         Job('e_aux', "e_aux=6", DEFAULT_PPG_ARGS, n_aux_epochs=6),
         Job('e_aux', "e_aux=3 (ST)", DEFAULT_PPG_ARGS, n_aux_epochs=3, shuffle_time=True),
         Job('e_aux', "ppo", DEFAULT_PPO_ARGS),
+
     ]
+
+    Job('v_trace', "vtrace=off", DEFAULT_PPG_ARGS, shuffle_time=True),
+    Job('v_trace', "vtrace=on", DEFAULT_PPG_ARGS, vtarget_mode='vtrace', shuffle_time=True),
+
 
     parser = argparse.ArgumentParser(description='Run a predefined job')
     parser.add_argument('job_name', type=str)

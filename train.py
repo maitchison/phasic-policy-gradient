@@ -23,6 +23,7 @@ def train_fn(env_name="coinrun",
              n_pi=32,
              beta_clone=1.0,
              vf_true_weight=1.0,
+             vtarget_mode="rollout",
              log_dir=DEFAULT_LOG_DIR,
              comm=None):
 
@@ -55,7 +56,7 @@ def train_fn(env_name="coinrun",
         outsize=256,
         chans=(16, 32, 32),
     )
-    model = ppg.PhasicValueModel(venv.ob_space, venv.ac_space, enc_fn, arch=arch)
+    model = ppg.PhasicValueModel(venv.ob_space, venv.ac_space, enc_fn, arch=arch, vtarget_mode=vtarget_mode)
 
     model.to(tu.dev())
     logger.log(tu.format_model(model))
@@ -98,8 +99,8 @@ def main():
     parser.add_argument('--n_pi', type=int, default=32)
     parser.add_argument('--clip_param', type=float, default=0.2)
     parser.add_argument('--kl_penalty', type=float, default=0.0)
-    parser.add_argument('--use_vtrace', type=bool, default=False)
     parser.add_argument('--device', type=str, default='auto')
+    parser.add_argument('--vtarget_mode', type=str, default='rollout', help="[rollout|vtrace]")
     parser.add_argument('--shuffle_time', type=bool, default=False)
     parser.add_argument('--arch', type=str, default='dual') # 'shared', 'detach', or 'dual'
 
@@ -120,12 +121,11 @@ def main():
 
     # handle shuffle
     import phasic.minibatch_optimize
-    print(f"Modified shuffle is {args.shuffle_time} v-trace is {args.use_vtrace}")
     phasic.minibatch_optimize.MB_SHUFFLE_TIME = args.shuffle_time
 
     # handle vtrace
     import phasic.ppg
-    phasic.ppg.USE_VTRACE = args.use_vtrace
+    phasic.ppg.USE_VTRACE = args.vtarget_mode == "vtrace"
 
     # handle MPI
     from mpi4py import MPI
@@ -142,6 +142,7 @@ def main():
         n_pi=args.n_pi,
         arch=args.arch,
         log_dir=args.run,
+        vtarget_mode=args.vtarget_mode,
         comm=comm)
 
 if __name__ == '__main__':
