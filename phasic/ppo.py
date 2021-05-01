@@ -202,7 +202,11 @@ def learn(
         tu.warn_no_gradient(model, "PPO")
         tu.sync_grads(params, grad_weight=grad_weight)
         diags = {k: v.detach() for (k, v) in diags.items()}
-        
+
+        # clip grads after we have accumulated them
+        grad = th.nn.utils.clip_grad_norm_(opt.parameters(), 100)
+        logger.logkv_mean(f"grad_{'-'.join(loss_keys)}", grad)
+
         opt.step()
         diags.update({f"loss_{k}": v.detach() for (k, v) in losses.items()})
         return diags

@@ -281,6 +281,10 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
         opt.zero_grad()
         loss.backward()
         tu.sync_grads(model.parameters())
+
+        grad = th.nn.utils.clip_grad_norm_(opt.parameters(), 100)
+        logger.logkv_mean(f"grad_aux", grad)
+
         opt.step()
 
 
