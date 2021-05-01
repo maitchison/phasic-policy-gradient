@@ -1,6 +1,12 @@
+import torch
+
 from . import ppo
 from . import logger
 from . import minibatch_optimize as mbo
+from . import vtrace
+
+from collections import defaultdict
+
 import torch as th
 import itertools
 from . import torch_util as tu
@@ -9,6 +15,8 @@ from .distr_builder import distr_builder
 from mpi4py import MPI
 from .tree_util import tree_map, tree_reduce
 import operator
+
+USE_VTRACE = False
 
 def sum_nonbatch(logprob_tree):
     """
@@ -200,12 +208,16 @@ def make_minibatches(segs, mbsize):
             yield result
 
 
-def aux_train(*, model, segs, opt, mbsize, name2coef):
+def aux_train(*, model, segs, opt, mbsize, name2coef, ppo_hps:dict):
     """
     Train on auxiliary loss + policy KL + vf distance
     """
+
     needed_keys = {"ob", "first", "state_in", "oldpd"}.union(model.aux_keys())
-    segs = [{k: seg[k] for k in needed_keys} for seg in segs]
+
+
+    segs = [{k: seg[k] for k in needed_keys if k in seg} for seg in segs]
+
     counter = 0
     for mini_batch_data in make_minibatches(segs, mbsize):
 
@@ -246,17 +258,80 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
         counter += 1
 
 
+def compute_vtrace_targets(seg, counter, ppo_hps):
+    """
+    Compute v-trace targets for given segment
+        seg["logp"] the logprobs of the actions taken during rollout
+        seg["oldpd"] the probability distribution calculated during presleep phase
+        seg["oldvpred"] the (uncorrected) value estimates calculated during presleep phase
+        seg["ac"] actions sampled during rollout
+        seg["reward"] rewards generated during rollout
+        seg["first"] indicates if state was first in an episode
+
+        seg["finaloldvpred"] estimate of value for final_obs
+
+        ppo_hps: used to make sure gamma, and lambda match
+    """
+
+    # data in segments is formatted as (B, T, *)
+
+    # shift finals back one to get terminal states.
+    dones = th.cat([seg['first'][:, 1:], seg['finalfirst'][:, None]], dim=1).float()
+
+    # generate (uncorrected) value estimates under current policy (and swap axis)
+    # and also get the current policy for the state aswell
+    # pd, aux = batched_forward(seg["ob"], seg["first"], seg["state_in"])
+
+    # _, aux_final = model(seg["finalob"][:, None], seg["finalfirst"][:, None],
+    #                                tree_map(lambda x: x[:, None], seg["finalstate"])
+    #                                )
+
+
+    def transpose_bt(x):
+        return torch.transpose(x, 0, 1)
+
+    # this function expects data in t,b format, so we need to swap everything around
+    vs, weighted_adv, cs = vtrace.importance_sampling_v_trace(
+        behaviour_log_prob=transpose_bt(seg['logp']),
+        target_log_policy=transpose_bt(seg['oldpd'].logits),
+        actions=transpose_bt(seg['ac']),
+        rewards=transpose_bt(seg['reward']),
+        dones=transpose_bt(dones),
+        target_value_estimates=transpose_bt(seg["oldvpred"]),
+        target_value_final_estimate=seg["finaloldvpred"],
+        gamma=ppo_hps["γ"],
+        lamb=ppo_hps["λ"],
+    )
+
+    if "old_vtarg" not in seg:
+        # keep this around for debuging purposes
+        seg["old_vtarg"] = seg["vtarg"]
+    seg['vtarg'] = transpose_bt(vs)
+
+    # show some debug information to make sure everything is ok
+    v_delta = 0.5 * th.mean((seg['vtarg'] - seg['old_vtarg'])**2)
+    print(f"Segment: {counter:02} {cs.mean():.2f} {cs.std():.2f} {v_delta:.2f}")
+
+
 def compute_presleep_outputs(
-    *, model, segs, mbsize, pdkey="oldpd", vpredkey="oldvpred"
+    *, model, segs, mbsize, pdkey="oldpd", vpredkey="oldvpred", ppo_hps
 ):
     def forward(ob, first, state_in):
         pd, vpred, _aux, _state_out = model.forward(ob.to(tu.dev()), first, state_in)
         return pd, vpred
 
-    for seg in segs:
+    for i, seg in enumerate(segs):
         seg[pdkey], seg[vpredkey] = tu.minibatched_call(
             forward, mbsize, ob=seg["ob"], first=seg["first"], state_in=seg["state_in"]
         )
+        if USE_VTRACE:
+            # generate the final value estimate
+            with th.no_grad():
+                _pd, vpred, _aux, _state_out = model(seg["finalob"][:, None], seg["finalfirst"][:, None], tree_map(lambda x: x[:, None], seg["finalstate"]))
+            seg["finaloldvpred"] = vpred[:, 0]
+
+            compute_vtrace_targets(seg=seg, counter=i, ppo_hps=ppo_hps)
+
 
 
 def learn(
@@ -306,7 +381,7 @@ def learn(
 
         if n_aux_epochs > 0:
             segs = ppo_state["seg_buf"]
-            compute_presleep_outputs(model=model, segs=segs, mbsize=aux_mbsize)
+            compute_presleep_outputs(model=model, segs=segs, mbsize=aux_mbsize, ppo_hps=ppo_hps)
             # Auxiliary phase
             for i in range(n_aux_epochs):
                 logger.log(f"Aux epoch {i}")
@@ -316,6 +391,37 @@ def learn(
                     opt=aux_state,
                     mbsize=aux_mbsize,
                     name2coef=name2coef,
+                    ppo_hps=ppo_hps,
                 )
                 logger.dumpkvs()
             segs.clear()
+
+# remove: just use their version...
+# @th.no_grad()
+#     def batched_forward(obs, first, state_in):
+#         """
+#         Run input through model, and return result.
+#         Data is broken into small batches to avoid high memory usage, and this function always runs without
+#         gradient.
+#
+#         Input should be of shape [b, t, *]
+#         Output will be of shape [b, t, *]
+#         """
+#         # todo make this process more than one rollout at a time (although a batch of 256 is probably fast enough...)
+#         b, t, *state_shape = obs.shape
+#
+#         pds = []
+#         auxs = defaultdict(list)
+#
+#         for i in range(b):
+#             pd, _, aux, _state_out = model(obs[i:i+1], first[i:i+1], tu.tree_slice(state_in, [i]))
+#             pds.append(pd.logits)
+#             for k, v in aux.items():
+#                 auxs[k].append(v)
+#
+#         pds = th.cat(pds, dim=0)
+#         auxs = {
+#             k: th.cat(v, dim=0) for k, v in auxs.items()
+#         }
+#
+#         return pds, auxs

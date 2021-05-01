@@ -23,7 +23,6 @@ def train_fn(env_name="coinrun",
              n_pi=32,
              beta_clone=1.0,
              vf_true_weight=1.0,
-             shuffle_time=False,
              log_dir=DEFAULT_LOG_DIR,
              comm=None):
 
@@ -99,6 +98,7 @@ def main():
     parser.add_argument('--n_pi', type=int, default=32)
     parser.add_argument('--clip_param', type=float, default=0.2)
     parser.add_argument('--kl_penalty', type=float, default=0.0)
+    parser.add_argument('--use_vtrace', type=bool, default=False)
     parser.add_argument('--device', type=str, default='auto')
     parser.add_argument('--shuffle_time', type=bool, default=False)
     parser.add_argument('--arch', type=str, default='dual') # 'shared', 'detach', or 'dual'
@@ -120,8 +120,12 @@ def main():
 
     # handle shuffle
     import phasic.minibatch_optimize
-    print(f"Modified shuffle is {args.shuffle_time}")
+    print(f"Modified shuffle is {args.shuffle_time} v-trace is {args.use_vtrace}")
     phasic.minibatch_optimize.MB_SHUFFLE_TIME = args.shuffle_time
+
+    # handle vtrace
+    import phasic.ppg
+    phasic.ppg.USE_VTRACE = args.use_vtrace
 
     # handle MPI
     from mpi4py import MPI
@@ -138,7 +142,6 @@ def main():
         n_pi=args.n_pi,
         arch=args.arch,
         log_dir=args.run,
-        shuffle_time=args.shuffle_time,
         comm=comm)
 
 if __name__ == '__main__':

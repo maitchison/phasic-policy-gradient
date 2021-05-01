@@ -38,7 +38,7 @@ class Job():
     def job_folder(self):
         return f"./run/{self.experiment}/{self.job_name}"
 
-    def run(self, device):
+    def run(self, device:str):
         """
         Executes the job
         """
@@ -59,23 +59,24 @@ class Job():
         args = " ".join(f"--{k} {v}" for k, v in self.args.items())
 
         if workers == 1:
-            command_str = f"python train.py {self.job_name} --device '{device}' {args}"
+            command_str = f"python train.py '{self.job_name}' --device '{device}' {args}"
         else:
-            command_str = f"mpiexec -np {workers} python train.py {self.job_name} --device '{device}' {args}"
+            command_str = f"mpiexec -np {workers} python train.py '{self.job_name}' --device '{device}' {args}"
         print(f"Running: {command_str}")
         os.system(command_str)
 
     def is_started(self):
         return os.path.exists(self.job_folder)
 
+
 if __name__ == "__main__":
 
     JOBS = [
-        Job('e_aux', "e_aux=0", DEFAULT_PPO_ARGS, n_aux_epochs=0),
-        Job('e_aux', "e_aux=1", DEFAULT_PPO_ARGS, n_aux_epochs=1),
-        Job('e_aux', "e_aux=3", DEFAULT_PPO_ARGS, n_aux_epochs=3),
-        Job('e_aux', "e_aux=6", DEFAULT_PPO_ARGS, n_aux_epochs=6),
-        Job('e_aux', "e_aux=3", DEFAULT_PPO_ARGS, n_aux_epochs=3, shuffle_time=True),
+        Job('e_aux', "e_aux=0", DEFAULT_PPG_ARGS, n_aux_epochs=0),
+        Job('e_aux', "e_aux=1", DEFAULT_PPG_ARGS, n_aux_epochs=1),
+        Job('e_aux', "e_aux=3", DEFAULT_PPG_ARGS, n_aux_epochs=3),
+        Job('e_aux', "e_aux=6", DEFAULT_PPG_ARGS, n_aux_epochs=6),
+        Job('e_aux', "e_aux=3 (ST)", DEFAULT_PPG_ARGS, n_aux_epochs=3, shuffle_time=True),
         Job('e_aux', "ppo", DEFAULT_PPO_ARGS),
     ]
 
@@ -83,7 +84,7 @@ if __name__ == "__main__":
     parser.add_argument('job_name', type=str)
     parser.add_argument('--device', type=str, default='0')
 
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     if args.job_name == "auto":
         todo_jobs = [job for job in JOBS if not job.is_started()]

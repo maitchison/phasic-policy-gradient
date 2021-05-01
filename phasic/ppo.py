@@ -15,6 +15,7 @@ import math
 from . import logger
 
 INPUT_KEYS = {"ob", "ac", "first", "logp", "vtarg", "adv", "state_in"}
+MICRO_BATCH_SIZE = 1024
 
 def compute_gae(
     *,
@@ -172,15 +173,18 @@ def learn(
         #      pickle.dump(arrays['ob'][0].cpu().numpy(), f)
         # exit()
 
-        # arrays obs is [B, N, H, W, C]
+        # arrays obs is [B, T, H, W, C]
 
-        N_MICRO_BATCHES = 8
         opt.zero_grad()
 
-        for micro_batch in range(N_MICRO_BATCHES):
+        b, t, *state_shape = arrays["ob"].shape
+        batch_size = b*t
+        n_micro_batches = math.ceil(batch_size / MICRO_BATCH_SIZE)
+
+        for micro_batch in range(n_micro_batches):
 
             # upload data to correct device
-            uploaded_arrays = tree_map(lambda x: tu.split_and_upload(x, micro_batch, N_MICRO_BATCHES), arrays)
+            uploaded_arrays = tree_map(lambda x: tu.split_and_upload(x, micro_batch, n_micro_batches), arrays)
 
             losses, diags = compute_losses(
                 model,
@@ -192,7 +196,7 @@ def learn(
             )
             loss = sum([losses[k] * get_weight(k) for k in loss_keys])
             # because we mean over the batches, we need to divide by micro batch count so that gradient is not scaled.
-            loss = loss / N_MICRO_BATCHES
+            loss = loss / n_micro_batches
             loss.backward()
 
         tu.warn_no_gradient(model, "PPO")
