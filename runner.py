@@ -1,11 +1,21 @@
 import os
 import argparse
+import sys
 
 DEFAULT_PPG_ARGS = {
     'env_name':     'coinrun',
     'num_envs':     256,
     'epochs':       25,
     'n_aux_epochs': 3,
+    'n_pi':         16, # save on the memory...
+}
+
+UPDATED_PPG_ARGS = {
+    'env_name':     'coinrun',
+    'num_envs':     256,
+    'epochs':       25,
+    'n_aux_epoch_pi': 3,
+    'n_aux_epoch_vf': 3,
     'n_pi':         16, # save on the memory...
 }
 
@@ -18,6 +28,7 @@ DEFAULT_PPO_ARGS = {
     'n_aux_epochs': 0,
     'arch':         'shared',
 }
+
 
 class Job():
 
@@ -63,6 +74,14 @@ class Job():
         else:
             command_str = f"mpiexec -np {workers} python train.py '{self.job_name}' --device '{device}' {args}"
         print(f"Running: {command_str}")
+
+        # log parameters
+        with open(f'params.txt', 'w') as f:
+            f.write(command_str)
+        with open(f'host.txt', 'w') as f:
+            import socket
+            f.write(socket.gethostname())
+
         os.system(command_str)
 
     def is_started(self):
@@ -87,8 +106,57 @@ if __name__ == "__main__":
         Job('testing', "2x_loss", DEFAULT_PPG_ARGS, vtarget_mode='vtrace2x', shuffle_time=True),
         Job('testing', "rollout_pi", DEFAULT_PPG_ARGS, vtarget_mode='rollout_pi', shuffle_time=True),
         Job('testing', "rollout_vf", DEFAULT_PPG_ARGS, vtarget_mode='rollout_vf', shuffle_time=True),
-    ]
 
+        Job('q3', "ppg_4400",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=4,
+            n_epoch_vf=4,
+            n_aux_epoch_pi=0,
+            n_aux_epoch_vf=0,
+            shuffle_time=True,
+            ),
+
+        Job('q3', "ppg_1133",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=1,
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=3,
+            vtarget_mode='rollout',
+            shuffle_time=True,
+            ),
+
+        Job('q3', "ppg_4103",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=4,
+            n_epoch_vf=1,
+            n_aux_epoch_pi=0,
+            n_aux_epoch_vf=3,
+            vtarget_mode='rollout',
+            shuffle_time=True,
+            ),
+
+        Job('q3', "ppg_1430",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=4,
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=0,
+            vtarget_mode='rollout',
+            shuffle_time=True,
+            ),
+
+        Job('q3', "vtr_1331",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=3,
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=1,
+            vtarget_mode='vtrace',
+            shuffle_time=True,
+            ),
+
+    ]
 
 
     parser = argparse.ArgumentParser(description='Run a predefined job')

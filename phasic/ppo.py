@@ -82,33 +82,40 @@ def compute_losses(
     vfcoef,
     entcoef,
     kl_penalty,
+    output:str="all"
 ):
     losses = {}
     diags = {}
-    pd, vpred, aux, _state_out = model(ob=ob, first=first, state_in=state_in)
-    newlogp = tu.sum_nonbatch(pd.log_prob(ac))
-    # prob ratio for KL / clipping based on a (possibly) recomputed logp
-    logratio = newlogp - logp
-    ratio = th.exp(logratio)
 
-    if clip_param > 0:
-        pg_losses = -adv * ratio
-        pg_losses2 = -adv * th.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param)
-        pg_losses = th.max(pg_losses, pg_losses2)
-    else:
-        pg_losses = -adv * th.exp(newlogp - logp)
+    pd, vpred, aux, _state_out = model(ob=ob, first=first, state_in=state_in, output=output)
 
-    diags["entropy"] = entropy = tu.sum_nonbatch(pd.entropy()).mean()
-    diags["negent"] = -entropy * entcoef
-    diags["pg"] = pg_losses.mean()
-    diags["pi_kl"] = kl_penalty * 0.5 * (logratio ** 2).mean()
+    if output in ['pi', 'all']:
+        newlogp = tu.sum_nonbatch(pd.log_prob(ac))
+        # prob ratio for KL / clipping based on a (possibly) recomputed logp
+        logratio = newlogp - logp
+        ratio = th.exp(logratio)
 
-    losses["pi"] = diags["negent"] + diags["pg"] + diags["pi_kl"]
-    losses["vf"] = vfcoef * ((vpred - vtarg) ** 2).mean()
+        if clip_param > 0:
+            pg_losses = -adv * ratio
+            pg_losses2 = -adv * th.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param)
+            pg_losses = th.max(pg_losses, pg_losses2)
+        else:
+            pg_losses = -adv * th.exp(newlogp - logp)
 
-    with th.no_grad():
-        diags["clipfrac"] = (th.abs(ratio - 1) > clip_param).float().mean()
-        diags["approxkl"] = 0.5 * (logratio ** 2).mean()
+        diags["entropy"] = entropy = tu.sum_nonbatch(pd.entropy()).mean()
+        diags["negent"] = -entropy * entcoef
+        diags["pg"] = pg_losses.mean()
+        diags["pi_kl"] = kl_penalty * 0.5 * (logratio ** 2).mean()
+
+        losses["pi"] = diags["negent"] + diags["pg"] + diags["pi_kl"]
+
+        with th.no_grad():
+            diags["clipfrac"] = (th.abs(ratio - 1) > clip_param).float().mean()
+            diags["approxkl"] = 0.5 * (logratio ** 2).mean()
+
+    if output in ['vf', 'all']:
+        losses["vf"] = vfcoef * ((vpred - vtarg) ** 2).mean()
+
 
     return losses, diags
 
@@ -123,7 +130,7 @@ def learn(
     clip_param: "(float) PPO parameter for clipping prob ratio" = 0.2,
     vfcoef: "(float) value function coefficient" = 0.5,
     entcoef: "(float) entropy coefficient" = 0.01,
-    nminibatch: "(int) number of minibatches to break epoch of data into" = 4,
+    nminibatch: "(int) number of minibatches to break epoch of data into" = 8, # stub, see if we get amp improvement?
     n_epoch_vf: "(int) number of epochs to use when training the value function" = 1,
     n_epoch_pi: "(int) number of epochs to use when training the policy" = 1,
     lr: "(float) Adam learning rate" = 5e-4,
@@ -134,6 +141,7 @@ def learn(
     rnorm: "(bool) reward normalization" = True,
     kl_penalty: "(int) weight of the KL penalty, which can be used in place of clipping" = 0,
     grad_weight: "(float) relative weight of this worker's gradients" = 1,
+    split_opt: bool=False,
     comm: "(MPI.Comm) MPI communicator" = None,
     callbacks: "(seq of function(dict)->bool) to run each update" = (),
     learn_state: "dict with optional keys {'opts', 'roller', 'lsh', 'reward_normalizer', 'curr_interact_count', 'seg_buf'}" = None,
@@ -144,16 +152,25 @@ def learn(
     learn_state = learn_state or {}
     ic_per_step = venv.num * comm.size * nstep
 
-    opt_keys = (
-        ["pi", "vf"] if (n_epoch_pi != n_epoch_vf) else ["pi"]
-    )  # use separate optimizers when n_epoch_pi != n_epoch_vf
-    params = list(model.parameters())
-    opts = learn_state.get("opts") or {
-        k: th.optim.Adam(params, lr=lr)
-        for k in opt_keys
-    }
+    if (n_epoch_pi != n_epoch_vf) and not split_opt:
+        print("Forcing split opt.")
+        split_opt = True
 
-    tu.sync_params(params)
+    all_params = list(model.parameters())
+
+    params = {}
+    if split_opt:
+        opt_keys = ["pi", "vf"]
+        # for the moment use all params...
+        params['pi'] = model.params_pi
+        params['vf'] = model.params_vf
+    else:
+        opt_keys = ["pi"]
+        params['pi'] = all_params
+
+    opts = learn_state.get("opts") or {k: th.optim.Adam(params[k], lr=lr) for k in opt_keys}
+
+    tu.sync_params(all_params)
 
     if rnorm:
         reward_normalizer = learn_state.get("reward_normalizer") or RewardNormalizer(venv.num)
@@ -163,7 +180,7 @@ def learn(
     def get_weight(k):
         return default_loss_weights[k] if k in default_loss_weights else 1.0
 
-    def train_with_losses_and_opt(loss_keys, opt, **arrays):
+    def train_with_losses_and_opt(loss_keys, opt, output:str, **arrays):
 
         # # # stub: check size
         # print(f"Running MB of size {len(arrays['ob'])} {arrays['ob'].shape} {arrays['ob'].dtype}", flush=True)
@@ -192,6 +209,7 @@ def learn(
                 kl_penalty=kl_penalty,
                 clip_param=clip_param,
                 vfcoef=vfcoef,
+                output=output,
                 **uploaded_arrays,
             )
             loss = sum([losses[k] * get_weight(k) for k in loss_keys])
@@ -199,12 +217,14 @@ def learn(
             loss = loss / n_micro_batches
             loss.backward()
 
-        tu.warn_no_gradient(model, "PPO")
-        tu.sync_grads(params, grad_weight=grad_weight)
+        # this doesn't really work when we have optimizers covering only part of the model...
+        #tu.warn_no_gradient(model, "PPO")
+
+        tu.sync_grads(all_params, grad_weight=grad_weight)
         diags = {k: v.detach() for (k, v) in diags.items()}
 
         # clip grads after we have accumulated them
-        grad = th.nn.utils.clip_grad_norm_(opt.parameters(), 100)
+        grad = th.nn.utils.clip_grad_norm_(tu.get_opt_params(opt), 100)
         logger.logkv_mean(f"grad_{'-'.join(loss_keys)}", grad)
 
         opt.step()
@@ -212,13 +232,13 @@ def learn(
         return diags
 
     def train_pi(**arrays):
-        return train_with_losses_and_opt(["pi"], opts["pi"], **arrays)
+        return train_with_losses_and_opt(["pi"], opts["pi"], 'pi', **arrays)
 
     def train_vf(**arrays):
-        return train_with_losses_and_opt(["vf"], opts["vf"], **arrays)
+        return train_with_losses_and_opt(["vf"], opts["vf"], 'vf', **arrays)
 
     def train_pi_and_vf(**arrays):
-        return train_with_losses_and_opt(["pi", "vf"], opts["pi"], **arrays)
+        return train_with_losses_and_opt(["pi", "vf"], opts["pi"], 'all', **arrays)
 
     roller = learn_state.get("roller") or Roller(
         act_fn=model.act,
@@ -257,7 +277,7 @@ def learn(
 
         with logger.profile_kv("optimization"):
             # when n_epoch_pi != n_epoch_vf, we perform separate policy and vf epochs with separate optimizers
-            if n_epoch_pi != n_epoch_vf:
+            if split_opt:
                 minibatch_optimize(
                     train_vf,
                     {k: seg[k] for k in INPUT_KEYS},

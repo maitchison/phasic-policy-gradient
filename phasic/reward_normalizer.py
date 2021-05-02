@@ -64,6 +64,7 @@ class RewardNormalizer:
     """
 
     def __init__(self, num_envs, cliprew=10.0, gamma=0.99, epsilon=1e-8, per_env=False):
+        print(f"Creating reward normalizer for {num_envs} environments.")
         ret_rms_shape = (num_envs,) if per_env else ()
         self.ret_rms = RunningMeanStd(shape=ret_rms_shape)
         self.cliprew = cliprew

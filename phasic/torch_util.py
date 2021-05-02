@@ -318,6 +318,12 @@ def th2np(tharr):
     return tharr.cpu().numpy()
 
 
+def get_opt_params(opt):
+    params = []
+    for group in opt.param_groups:
+        params.extend([x for x in group['params'] if x.requires_grad])
+    return params
+
 def NormedLinear(*args, scale=1.0, dtype=th.float32, **kwargs):
     """
     nn.Linear but with normalized fan-in init

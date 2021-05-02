@@ -17,6 +17,7 @@ from .tree_util import tree_map, tree_reduce
 import operator
 
 USE_VTRACE = False
+USE_AMP = False
 
 def sum_nonbatch(logprob_tree):
     """
@@ -86,6 +87,8 @@ class PhasicValueModel(PhasicModel):
         vf_keys = None
         pi_key = "pi"
 
+        self.scaler = th.cuda.amp.GradScaler()
+
         if arch == "shared":
             true_vf_key = "pi"
         elif arch == "detach":
@@ -118,7 +121,15 @@ class PhasicValueModel(PhasicModel):
         self.pi_head = tu.NormedLinear(lastsize, pi_outsize, scale=0.1)
         self.aux_vf_head = tu.NormedLinear(lastsize, 1, scale=0.1)
 
-    def compute_aux_loss(self, aux, seg):
+    @property
+    def params_pi(self):
+        return [*self.pi_enc.parameters(), *self.pi_head.parameters(), *self.aux_vf_head.parameters()]
+
+    @property
+    def params_vf(self):
+        return [*self.vf_enc.parameters(), *self.vf_vhead.parameters()]
+
+    def compute_aux_loss(self, aux, seg, output: str = 'both'):
 
         aux_scale = 1.0
         true_scale = 1.0
@@ -126,43 +137,20 @@ class PhasicValueModel(PhasicModel):
         if self.vtarget_mode == "rollout":
             vtarg_aux = seg["vtarg"]
             vtarg_tru = seg["vtarg"]
-        elif self.vtarget_mode == "rollout_pi":
-            vtarg_aux = seg["vtarg"]
-            vtarg_tru = None
-        elif self.vtarget_mode == "rollout_vf":
-            vtarg_aux = None
-            vtarg_tru = seg["vtarg"]
-        elif self.vtarget_mode == "sleep":
-            raise NotImplementedError('sorry, return calculations during sleep phase are not implemented yet.')
         elif self.vtarget_mode == "vtrace":
             assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
             vtarg_aux = seg["vtarg_vtrace"]
-            vtarg_tru = seg["vtarg_vtrace"]
-        elif self.vtarget_mode == "vtrace2x":
-            assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
-            vtarg_aux = seg["vtarg_vtrace"]
-            vtarg_tru = seg["vtarg_vtrace"]
-            true_scale = 2.0
-            aux_scale = 2.0
-        elif self.vtarget_mode == "vtrace_distill":
-            assert "vtarg_vtrace" in seg, "v-trace missing targets, make sure you calculate them when enabling v-trace."
-            # vtarg_aux = seg["oldvpred"] # this would probably do, but since we have vpredtrue sitting here use that.
-            vtarg_aux = aux["vpredtrue"].detach() # actual distillation
             vtarg_tru = seg["vtarg_vtrace"]
         else:
             raise ValueError(f"invalid vtarget_mode {self.vtarget_mode}")
 
         result = {}
-        if vtarg_aux is not None:
-            # train pi module
+
+        if output in ["pi", "both"]:
             result["vf_aux"] = aux_scale * 0.5 * ((aux["vpredaux"] - vtarg_aux) ** 2).mean()
-        else:
-            result["vf_aux"] = 0
-        if vtarg_tru is not None:
-            # train vf module
+
+        if output in ["vf", "both"]:
             result["vf_true"] = true_scale * 0.5 * ((aux["vpredtrue"] - vtarg_tru) ** 2).mean()
-        else:
-            result["vf_true"] = 0
 
         return result
 
@@ -185,25 +173,40 @@ class PhasicValueModel(PhasicModel):
     def set_vhead(self, key, layer):
         setattr(self, key + "_vhead", layer)
 
-    def forward(self, ob, first, state_in):
+    def forward(self, ob, first, state_in, output: str = 'all'):
+        """
+        Output is pi|fv|all
+        """
         state_out = {}
         x_out = {}
 
-        for k in self.enc_keys:
+        encoder_keys = [output] if output != 'all' else self.enc_keys
+
+        for k in encoder_keys:
             x_out[k], state_out[k] = self.get_encoder(k)(ob, first, state_in[k])
             x_out[k] = self.reshape_x(x_out[k])
 
-        pi_x = x_out[self.pi_key]
-        pivec = self.pi_head(pi_x)
-        pd = self.make_distr(pivec)
+        if output in ['pi', 'all']:
+            pi_x = x_out[self.pi_key]
+            pivec = self.pi_head(pi_x)
+            pd = self.make_distr(pivec)
+        else:
+            pi_x = None
+            pd = None
 
         aux = {}
-        for k in self.vf_keys:
-            if self.detach_value_head:
-                x_out[k] = x_out[k].detach()
-            aux[k] = self.get_vhead(k)(x_out[k])[..., 0]
-        vfvec = aux[self.true_vf_key]
-        aux.update({"vpredaux": self.aux_vf_head(pi_x)[..., 0], "vpredtrue": vfvec})
+        if output in ['vf', 'all']:
+            for k in self.vf_keys:
+                if self.detach_value_head:
+                    x_out[k] = x_out[k].detach()
+                aux[k] = self.get_vhead(k)(x_out[k])[..., 0]
+            vfvec = aux[self.true_vf_key]
+            aux['vpredtrue'] = vfvec
+        else:
+            vfvec = None
+
+        if pi_x is not None:
+            aux["vpredaux"] = self.aux_vf_head(pi_x)[..., 0]
 
         return pd, vfvec, aux, state_out
 
@@ -253,10 +256,17 @@ def make_minibatches(segs, mbsize):
             yield result
 
 
-def aux_train(*, model, segs, opt, mbsize, name2coef):
+def aux_train(*, model, segs, opt, mbsize, name2coef, module:str):
     """
     Train on auxiliary loss + policy KL + vf distance
+
+    module is pi|fv
     """
+
+    def clip_and_sync():
+        tu.sync_grads(model.parameters())
+        grad = th.nn.utils.clip_grad_norm_(tu.get_opt_params(opt), 100)
+        logger.logkv_mean(f"grad_aux", grad)
 
     optional_keys = {"vtarg_vtrace", "oldvpred"}
 
@@ -265,27 +275,39 @@ def aux_train(*, model, segs, opt, mbsize, name2coef):
 
     segs = [{k: seg[k] for k in needed_keys} for seg in segs]
     for mb in make_minibatches(segs, mbsize):
-        mb = tree_map(lambda x: x.to(tu.dev()), mb)
-        pd, _, aux, _state_out = model(mb["ob"], mb["first"], mb["state_in"])
-        name2loss = {}
-        name2loss["pol_distance"] = td.kl_divergence(mb["oldpd"], pd).mean()
-        name2loss.update(model.compute_aux_loss(aux, mb))
-        assert set(name2coef.keys()).issubset(name2loss.keys())
-        loss = 0
-        for name in name2loss.keys():
-            unscaled_loss = name2loss[name]
-            scaled_loss = unscaled_loss * name2coef.get(name, 1)
-            logger.logkv_mean("unscaled/" + name, unscaled_loss)
-            logger.logkv_mean("scaled/" + name, scaled_loss)
-            loss += scaled_loss
+
         opt.zero_grad()
-        loss.backward()
-        tu.sync_grads(model.parameters())
 
-        grad = th.nn.utils.clip_grad_norm_(opt.parameters(), 100)
-        logger.logkv_mean(f"grad_aux", grad)
+        with th.cuda.amp.autocast(enabled=USE_AMP):
 
-        opt.step()
+            mb = tree_map(lambda x: x.to(tu.dev()), mb)
+
+            pd, _, aux, _state_out = model(mb["ob"], mb["first"], mb["state_in"], output=module)
+            name2loss = {}
+
+            if module == "pi":
+                # this is only needed if we are training pi module.
+                name2loss["pol_distance"] = td.kl_divergence(mb["oldpd"], pd).mean()
+
+            name2loss.update(model.compute_aux_loss(aux, mb, module))
+
+            loss = 0
+            for name in name2loss.keys():
+                unscaled_loss = name2loss[name]
+                scaled_loss = unscaled_loss * name2coef.get(name, 1)
+                logger.logkv_mean("unscaled/" + name, unscaled_loss)
+                logger.logkv_mean("scaled/" + name, scaled_loss)
+                loss += scaled_loss
+
+        if USE_AMP:
+            clip_and_sync()
+            model.scaler.scale(loss).backward()
+            model.scaler.step(opt)
+            model.scaler.update()
+        else:
+            loss.backward()
+            clip_and_sync()
+            opt.step()
 
 
 def compute_vtrace_targets(seg, counter, ppo_hps):
@@ -381,11 +403,13 @@ def learn(
     ppo_hps,
     aux_lr,
     aux_mbsize,
-    n_aux_epochs=6,
+    n_aux_epoch_pi=6,
+    n_aux_epoch_vf=6,
     n_pi=32,
     kl_ewma_decay=None,
     interacts_total=float("inf"),
     name2coef=None,
+    split_opt=False,
     comm=None,
 ):
     """
@@ -396,11 +420,19 @@ def learn(
         comm = MPI.COMM_WORLD
 
     ppo_state = None
-    aux_state = th.optim.Adam(model.parameters(), lr=aux_lr)
+
+    if split_opt:
+        opt_vf = th.optim.Adam(model.params_vf, lr=aux_lr)
+        opt_pi = th.optim.Adam(model.params_pi, lr=aux_lr)
+    else:
+        opt_vf = opt_pi = th.optim.Adam(model.parameters(), lr=aux_lr)
+
     name2coef = name2coef or {}
 
+    use_aux_phase = n_aux_epoch_pi != 0 or n_aux_epoch_vf != 0
+
     while True:
-        store_segs = n_pi != 0 and n_aux_epochs != 0
+        store_segs = n_pi != 0 and use_aux_phase
 
         # Policy phase
         ppo_state = ppo.learn(
@@ -412,6 +444,7 @@ def learn(
             ],
             interacts_total=interacts_total,
             store_segs=store_segs,
+            split_opt=split_opt,
             comm=comm,
             **ppo_hps,
         )
@@ -419,18 +452,31 @@ def learn(
         if ppo_state["curr_interact_count"] >= interacts_total:
             break
 
-        if n_aux_epochs > 0:
+        if use_aux_phase:
             segs = ppo_state["seg_buf"]
             compute_presleep_outputs(model=model, segs=segs, mbsize=aux_mbsize, ppo_hps=ppo_hps)
-            # Auxiliary phase
-            for i in range(n_aux_epochs):
-                logger.log(f"Aux epoch {i}")
+
+            for i in range(n_aux_epoch_pi):
+                logger.log(f"Aux epoch pi_{i}")
                 aux_train(
                     model=model,
                     segs=segs,
-                    opt=aux_state,
+                    opt=opt_pi,
                     mbsize=aux_mbsize,
                     name2coef=name2coef,
+                    module='pi',
+                )
+                logger.dumpkvs()
+
+            for i in range(n_aux_epoch_vf):
+                logger.log(f"Aux epoch vf_{i}")
+                aux_train(
+                    model=model,
+                    segs=segs,
+                    opt=opt_vf,
+                    mbsize=aux_mbsize,
+                    name2coef=name2coef,
+                    module='vf',
                 )
                 logger.dumpkvs()
             segs.clear()
