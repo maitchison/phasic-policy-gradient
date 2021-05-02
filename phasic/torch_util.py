@@ -577,6 +577,7 @@ def _process_modelpath(path, stage_index):
     return path.replace("-stage-0", f"-stage-{stage_index}")
 
 def split_and_upload(x: th.Tensor, split: int, splits: int):
+    # note: would be faster if we just split this into chunks rather than use every x.
     assert type(x) is th.Tensor, f"Input {x} should be a Tensor."
     assert len(x) % splits == 0, f"Shape of data {x} is {x.shape} but length must divide {splits}"
     return x[split::splits].to(dev())

@@ -156,6 +156,28 @@ if __name__ == "__main__":
             shuffle_time=True,
             ),
 
+        # Job('q3b', "vtr_1133_slow",
+        #     UPDATED_PPG_ARGS,
+        #     n_epoch_pi=1,
+        #     n_epoch_vf=3,
+        #     n_aux_epoch_pi=3,
+        #     n_aux_epoch_vf=1,
+        #     aux_lr=2.5e-4,
+        #     vtarget_mode='vtrace',
+        #     shuffle_time=True,
+        #     ),
+
+        Job('q3b', "mpg_1430",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=2, # 1 would be fair.. but lets try 2...
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=0,
+            vtarget_mode='rollout',
+            v_mixing=True,
+            shuffle_time=True,
+            ),
+
     ]
 
 

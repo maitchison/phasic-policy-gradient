@@ -216,7 +216,7 @@ class PhasicValueModel(PhasicModel):
     def aux_keys(self):
         return ["vtarg"]
 
-def make_minibatches(segs, mbsize):
+def make_minibatches(segs, mbsize, force_no_time_shuffle=False):
     """
     Yield one epoch of minibatch over the dataset described by segs
     Each minibatch mixes data between different segs
@@ -236,7 +236,7 @@ def make_minibatches(segs, mbsize):
         'vf': th.zeros([mbsize, 0])
     }
 
-    if mbo.MB_SHUFFLE_TIME:
+    if mbo.MB_SHUFFLE_TIME and not force_no_time_shuffle:
         # not be best work, but it'll do the trick
         reshaped_segs = tree_map(lambda x: mbo.merge_down(x, b, t), segs)
         for mbinds in th.randperm(t * b * s).split(mbsize*t):
@@ -265,7 +265,7 @@ def aux_train(*, model, segs, opt, mbsize, name2coef, module:str):
 
     def clip_and_sync():
         tu.sync_grads(model.parameters())
-        grad = th.nn.utils.clip_grad_norm_(tu.get_opt_params(opt), 100)
+        grad = th.nn.utils.clip_grad_norm_(tu.get_opt_params(opt), 20)
         logger.logkv_mean(f"grad_aux", grad)
 
     optional_keys = {"vtarg_vtrace", "oldvpred"}
@@ -310,7 +310,7 @@ def aux_train(*, model, segs, opt, mbsize, name2coef, module:str):
             opt.step()
 
 
-def compute_vtrace_targets(seg, counter, ppo_hps):
+def compute_vtrace_targets(seg, counter, ppo_hps, verbose=True):
     """
     Compute v-trace targets for given segment
         seg["logp"] the logprobs of the actions taken during rollout
@@ -351,27 +351,31 @@ def compute_vtrace_targets(seg, counter, ppo_hps):
     # v_roll_delta is how far v-trace value estimates are away from what PPG would normally train on (which are the rollout values)
     # v_pred_delta is how far v-trace value estimates are away from predictions made at the beginning of the aux_phase
 
-    v_roll_delta = th.mean((seg['vtarg'] - seg['vtarg_vtrace'])**2)
-    v_pred_delta = th.mean((seg['oldvpred'] - seg['vtarg_vtrace']) ** 2)
-    v_diff_max = th.max(th.abs(seg['vtarg'] - seg['vtarg_vtrace']))
+    if verbose:
+        v_roll_delta = th.mean((seg['vtarg'] - seg['vtarg_vtrace'])**2)
+        v_pred_delta = th.mean((seg['oldvpred'] - seg['vtarg_vtrace']) ** 2)
+        v_diff_max = th.max(th.abs(seg['vtarg'] - seg['vtarg_vtrace']))
 
-    print('Dones:', dones.sum())
-    print('Rewards:', seg["reward"].sum())
+        if type(counter) == 0:
+            counter = counter.zfill(2)
 
-    print(f"" + \
-          f"Segment: {counter:02} cs:{cs.mean():.2f} +- {cs.std():.3f}," +
-          f"v_pred_delta:{v_pred_delta:.3f} v_roll_delta:{v_roll_delta:.3f}, "+
-          f"v_diff_max: {v_diff_max:.2f} "
-          )
-    logger.logkv_mean(f"vtrace/cs_mu_{counter:02}", cs.mean())
-    logger.logkv_mean(f"vtrace/cs_std_{counter:02}", cs.std())
-    logger.logkv_mean(f"vtrace/v_roll_delta_{counter:02}", v_roll_delta)
-    logger.logkv_mean(f"vtrace/v_pred_delta_{counter:02}", v_pred_delta)
-    logger.logkv_mean(f"vtrace/v_pred_max_{counter:02}", v_diff_max)
+        print(f"" + \
+              f"Segment: {counter} cs:{cs.mean():.2f} +- {cs.std():.3f}," +
+              f"v_pred_delta:{v_pred_delta:.3f} v_roll_delta:{v_roll_delta:.3f}, " +
+              f"v_diff_max: {v_diff_max:.2f} " +
+              f"v_diff_max: {v_diff_max:.2f} " +
+              f"Dones: {dones.sum()} " +
+              f"Rewards {seg['reward'].sum()}"
+              )
+        logger.logkv_mean(f"vtrace/cs_mu_{counter}", cs.mean())
+        logger.logkv_mean(f"vtrace/cs_std_{counter}", cs.std())
+        logger.logkv_mean(f"vtrace/v_roll_delta_{counter}", v_roll_delta)
+        logger.logkv_mean(f"vtrace/v_pred_delta_{counter}", v_pred_delta)
+        logger.logkv_mean(f"vtrace/v_pred_max_{counter}", v_diff_max)
 
 
 def compute_presleep_outputs(
-    *, model, segs, mbsize, pdkey="oldpd", vpredkey="oldvpred", ppo_hps
+    *, model, segs, mbsize, pdkey="oldpd", vpredkey="oldvpred", ppo_hps, include_vtrace=False
 ):
     def forward(ob, first, state_in):
         pd, vpred, _aux, _state_out = model.forward(ob.to(tu.dev()), first, state_in)
@@ -381,18 +385,17 @@ def compute_presleep_outputs(
         vpred = vpred.cpu()
         return pd, vpred
 
-
     for i, seg in enumerate(segs):
         seg[pdkey], seg[vpredkey] = tu.minibatched_call(
             forward, mbsize, ob=seg["ob"], first=seg["first"], state_in=seg["state_in"]
         )
-        if USE_VTRACE:
+        if include_vtrace:
             # generate the final value estimate
             with th.no_grad():
                 pd, vpred = forward(seg["finalob"][:, None], seg["finalfirst"][:, None], tree_map(lambda x: x[:, None], seg["finalstate"]))
             seg["finaloldvpred"] = vpred[:, 0]
-
-            compute_vtrace_targets(seg=seg, counter=i, ppo_hps=ppo_hps)
+            # generate vtrace estimates
+            compute_vtrace_targets(seg=seg, counter=i if len(segs) > 1 else 'xx', ppo_hps=ppo_hps)
 
 
 
@@ -405,11 +408,11 @@ def learn(
     aux_mbsize,
     n_aux_epoch_pi=6,
     n_aux_epoch_vf=6,
+    v_mixing=False,
     n_pi=32,
     kl_ewma_decay=None,
     interacts_total=float("inf"),
     name2coef=None,
-    split_opt=False,
     comm=None,
 ):
     """
@@ -421,11 +424,8 @@ def learn(
 
     ppo_state = None
 
-    if split_opt:
-        opt_vf = th.optim.Adam(model.params_vf, lr=aux_lr)
-        opt_pi = th.optim.Adam(model.params_pi, lr=aux_lr)
-    else:
-        opt_vf = opt_pi = th.optim.Adam(model.parameters(), lr=aux_lr)
+    opt_vf = th.optim.Adam(model.params_vf, lr=aux_lr)
+    opt_pi = th.optim.Adam(model.params_pi, lr=aux_lr)
 
     name2coef = name2coef or {}
 
@@ -444,7 +444,7 @@ def learn(
             ],
             interacts_total=interacts_total,
             store_segs=store_segs,
-            split_opt=split_opt,
+            v_mixing=v_mixing,
             comm=comm,
             **ppo_hps,
         )
@@ -454,7 +454,7 @@ def learn(
 
         if use_aux_phase:
             segs = ppo_state["seg_buf"]
-            compute_presleep_outputs(model=model, segs=segs, mbsize=aux_mbsize, ppo_hps=ppo_hps)
+            compute_presleep_outputs(model=model, segs=segs, mbsize=aux_mbsize, ppo_hps=ppo_hps, include_vtrace=USE_VTRACE)
 
             for i in range(n_aux_epoch_pi):
                 logger.log(f"Aux epoch pi_{i}")
@@ -479,4 +479,3 @@ def learn(
                     module='vf',
                 )
                 logger.dumpkvs()
-            segs.clear()

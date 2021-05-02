@@ -1,8 +1,10 @@
 """
 Mostly copied from ppo.py but with some extra options added that are relevant to phasic
 """
+import random
 
 import torch as th
+from . import vtrace
 from mpi4py import MPI
 from .tree_util import tree_map
 from . import torch_util as tu
@@ -10,6 +12,7 @@ from .log_save_helper import LogSaveHelper
 from .minibatch_optimize import minibatch_optimize
 from .roller import Roller
 from .reward_normalizer import RewardNormalizer
+from . import ppg
 
 import math
 from . import logger
@@ -141,8 +144,8 @@ def learn(
     rnorm: "(bool) reward normalization" = True,
     kl_penalty: "(int) weight of the KL penalty, which can be used in place of clipping" = 0,
     grad_weight: "(float) relative weight of this worker's gradients" = 1,
-    split_opt: bool=False,
     comm: "(MPI.Comm) MPI communicator" = None,
+    v_mixing: False,
     callbacks: "(seq of function(dict)->bool) to run each update" = (),
     learn_state: "dict with optional keys {'opts', 'roller', 'lsh', 'reward_normalizer', 'curr_interact_count', 'seg_buf'}" = None,
 ):
@@ -152,21 +155,14 @@ def learn(
     learn_state = learn_state or {}
     ic_per_step = venv.num * comm.size * nstep
 
-    if (n_epoch_pi != n_epoch_vf) and not split_opt:
-        print("Forcing split opt.")
-        split_opt = True
-
     all_params = list(model.parameters())
 
     params = {}
-    if split_opt:
-        opt_keys = ["pi", "vf"]
-        # for the moment use all params...
-        params['pi'] = model.params_pi
-        params['vf'] = model.params_vf
-    else:
-        opt_keys = ["pi"]
-        params['pi'] = all_params
+
+    opt_keys = ["pi", "vf"]
+    # for the moment use all params...
+    params['pi'] = model.params_pi
+    params['vf'] = model.params_vf
 
     opts = learn_state.get("opts") or {k: th.optim.Adam(params[k], lr=lr) for k in opt_keys}
 
@@ -181,14 +177,6 @@ def learn(
         return default_loss_weights[k] if k in default_loss_weights else 1.0
 
     def train_with_losses_and_opt(loss_keys, opt, output:str, **arrays):
-
-        # # # stub: check size
-        # print(f"Running MB of size {len(arrays['ob'])} {arrays['ob'].shape} {arrays['ob'].dtype}", flush=True)
-        # # # export frame for debuging
-        # import pickle
-        # with open("obs_2.dat", 'wb') as f:
-        #      pickle.dump(arrays['ob'][0].cpu().numpy(), f)
-        # exit()
 
         # arrays obs is [B, T, H, W, C]
 
@@ -224,7 +212,7 @@ def learn(
         diags = {k: v.detach() for (k, v) in diags.items()}
 
         # clip grads after we have accumulated them
-        grad = th.nn.utils.clip_grad_norm_(tu.get_opt_params(opt), 100)
+        grad = th.nn.utils.clip_grad_norm_(tu.get_opt_params(opt), 20)
         logger.logkv_mean(f"grad_{'-'.join(loss_keys)}", grad)
 
         opt.step()
@@ -236,6 +224,42 @@ def learn(
 
     def train_vf(**arrays):
         return train_with_losses_and_opt(["vf"], opts["vf"], 'vf', **arrays)
+
+    def train_mixture(**arrays):
+        """
+        Train value function on mixture of off and on policy data.
+
+        Input is mini_batch arrays in [B,T, * ] format on device CPU
+
+        """
+
+        'ac', 'adv', 'finalfirst', 'finalob', 'finalstate', 'first', 'logp', 'ob', 'reward', 'vpred', 'vtarg'
+        'ac', 'adv', 'finalfirst', 'finalob', 'finalstate', 'first', 'logp', 'ob', 'reward', 'vpred', 'vtarg'
+
+        B, T, *state_shape = arrays["ob"].shape
+        segs = seg_buf
+        ppo_hps = {
+            'γ': γ,
+            'λ': λ,
+        }
+
+        # 1. sample from our replay buffer
+        # this will be with replacement, but that is just fine as the buffer is quite large.
+        off_policy_mb = next(ppg.make_minibatches(segs, mbsize=B*3, force_no_time_shuffle=True))
+
+        # 2. generate updated value estimates
+        ppg.compute_presleep_outputs(
+            model=model, segs=[off_policy_mb], mbsize=4, pdkey="oldpd", vpredkey="oldvpred", ppo_hps=ppo_hps,
+            include_vtrace=True
+        )
+        off_policy_mb['vtarg'] = off_policy_mb['vtarg_vtrace']
+        off_policy_mb = {k: v for k, v in off_policy_mb.items() if k in arrays}
+
+        # 3. combine everything into one big batch.
+        combined_arrays = tu.tree_cat([arrays, off_policy_mb])
+
+        # 4. train on this
+        return train_with_losses_and_opt(["vf"], opts["vf"], 'vf', **combined_arrays)
 
     def train_pi_and_vf(**arrays):
         return train_with_losses_and_opt(["pi", "vf"], opts["pi"], 'all', **arrays)
@@ -265,6 +289,10 @@ def learn(
     curr_iteration = 0
     seg_buf = learn_state.get("seg_buf") or []
 
+    # cull unwanted data from pre-existing buffer (otherwise we won't be able to concatinate them)
+    required_keys = ('ac', 'adv', 'finalfirst', 'finalob', 'finalstate', 'first', 'logp', 'ob', 'reward', 'vpred', 'vtarg')
+    seg_buf = [{k: v for k, v in seg.items() if k in required_keys} for seg in seg_buf]
+
     while curr_interact_count < interacts_total and not callback_exit:
         seg = roller.multi_step(nstep)
         lsh.gather_roller_stats(roller)
@@ -273,25 +301,30 @@ def learn(
         compute_advantage(model, seg, γ, λ, comm=comm)
 
         if store_segs:
-            seg_buf.append(tree_map(lambda x: x.cpu(), seg))
+            seg_to_store = tree_map(lambda x: x.cpu(), seg)
+            if curr_iteration < len(seg_buf):
+                # just reuse buffer
+                seg_buf[curr_iteration] = seg_to_store
+            else:
+                seg_buf.append(seg_to_store)
 
         with logger.profile_kv("optimization"):
-            # when n_epoch_pi != n_epoch_vf, we perform separate policy and vf epochs with separate optimizers
-            if split_opt:
-                minibatch_optimize(
-                    train_vf,
-                    {k: seg[k] for k in INPUT_KEYS},
-                    nminibatch=nminibatch,
-                    comm=comm,
-                    nepoch=n_epoch_vf,
-                    verbose=verbose,
-                )
-                train_fn = train_pi
-            else:
-                train_fn = train_pi_and_vf
+
+            # note: we should probably update policy first, then value.. need to think about this a bit more though
+            # also I think maybe we could vtrace the on-policy data, as it's now slightly off-policy.
+            # this is esentially the AGAE idea...
+
+            minibatch_optimize(
+                train_mixture if v_mixing else train_vf,
+                {k: seg[k] for k in INPUT_KEYS},
+                nminibatch=nminibatch,
+                comm=comm,
+                nepoch=n_epoch_vf,
+                verbose=verbose,
+            )
 
             epoch_stats = minibatch_optimize(
-                train_fn,
+                train_pi,
                 {k: seg[k] for k in INPUT_KEYS},
                 nminibatch=nminibatch,
                 comm=comm,

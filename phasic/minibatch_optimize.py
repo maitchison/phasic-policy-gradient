@@ -50,7 +50,6 @@ def minibatch_optimize(
     comm: "(MPI.Comm) MPI communicator",
     verbose: "(bool) print detailed stats" = False,
     epoch_fn: "function () -> dict to be called each epoch" = None,
-    shuffle_time=False,
 ):
     ntrain = tu.batch_len(tensordict)
     if nminibatch > ntrain:
@@ -122,7 +121,6 @@ def minibatch_gen(data, *, batch_size=None, nminibatch=None, forever=False, devi
         }
     else:
         fake_state = None
-
 
     while True:
         if MB_SHUFFLE_TIME:

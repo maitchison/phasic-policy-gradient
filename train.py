@@ -21,7 +21,7 @@ def train_fn(env_name="coinrun",
              kl_penalty=0.0,
              n_aux_epoch_pi=6,
              n_aux_epoch_vf=6,
-             split_opt=False,
+             v_mixing=False,
              n_pi=32,
              beta_clone=1.0,
              vf_true_weight=1.0,
@@ -86,9 +86,9 @@ def train_fn(env_name="coinrun",
         aux_mbsize=aux_mbsize,
         n_aux_epoch_pi=n_aux_epoch_pi,
         n_aux_epoch_vf=n_aux_epoch_vf,
+        v_mixing=v_mixing,
         n_pi=n_pi,
         name2coef=name2coef,
-        split_opt=split_opt,
         comm=comm,
     )
 
@@ -105,10 +105,12 @@ def main():
     parser.add_argument('--n_aux_epoch_vf', type=int, default=6)
     parser.add_argument('--n_pi', type=int, default=32)
     parser.add_argument('--clip_param', type=float, default=0.2)
+    parser.add_argument('--micro_batch_size', type=int, default=1024)
     parser.add_argument('--kl_penalty', type=float, default=0.0)
+    parser.add_argument('--aux_lr', type=float, default=5e-4)
     parser.add_argument('--amp', type=bool, default=False, help="Enabled Automatic Mixed Precision on aux_phase.")
+    parser.add_argument('--v_mixing', type=bool, default=False, help="Enables off-policy mixing during ppo training phase.")
     parser.add_argument('--device', type=str, default='auto')
-    parser.add_argument('--split_opt', type=bool, default=True, help="uses seperate optimizers for pi and vf (recommended)")
     parser.add_argument('--vtarget_mode', type=str, default='rollout', help="[rollout|vtrace]")
     parser.add_argument('--shuffle_time', type=bool, default=False)
     parser.add_argument('--arch', type=str, default='dual') # 'shared', 'detach', or 'dual'
@@ -127,6 +129,10 @@ def main():
 
     print(f"Set devices to: {os.environ['CUDA_VISIBLE_DEVICES']}")
     os.environ["RCALL_LOGDIR"] = "./"
+
+    # handle micro_batch_size
+    import phasic.ppo
+    phasic.ppo.MICRO_BATCH_SIZE = args.micro_batch_size
 
     # handle shuffle
     import phasic.minibatch_optimize
@@ -152,9 +158,10 @@ def main():
         interacts_total=int(args.epochs*1e6),
         n_pi=args.n_pi,
         arch=args.arch,
-        split_opt=args.split_opt,
+        v_mixing=args.v_mixing,
         log_dir=args.run,
         vtarget_mode=args.vtarget_mode,
+        aux_lr=args.aux_lr,
         comm=comm)
 
 if __name__ == '__main__':
