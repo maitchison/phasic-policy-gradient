@@ -206,7 +206,7 @@ def learn(
             loss.backward()
 
         # this doesn't really work when we have optimizers covering only part of the model...
-        #tu.warn_no_gradient(model, "PPO")
+        # tu.warn_no_gradient(model, "PPO")
 
         tu.sync_grads(all_params, grad_weight=grad_weight)
         diags = {k: v.detach() for (k, v) in diags.items()}
@@ -232,9 +232,6 @@ def learn(
         Input is mini_batch arrays in [B,T, * ] format on device CPU
 
         """
-
-        'ac', 'adv', 'finalfirst', 'finalob', 'finalstate', 'first', 'logp', 'ob', 'reward', 'vpred', 'vtarg'
-        'ac', 'adv', 'finalfirst', 'finalob', 'finalstate', 'first', 'logp', 'ob', 'reward', 'vpred', 'vtarg'
 
         B, T, *state_shape = arrays["ob"].shape
         segs = seg_buf
@@ -291,7 +288,8 @@ def learn(
 
     # cull unwanted data from pre-existing buffer (otherwise we won't be able to concatinate them)
     required_keys = ('ac', 'adv', 'finalfirst', 'finalob', 'finalstate', 'first', 'logp', 'ob', 'reward', 'vpred', 'vtarg')
-    seg_buf = [{k: v for k, v in seg.items() if k in required_keys} for seg in seg_buf]
+    for i in range(len(seg_buf)):
+        seg_buf[i] = {k: v for k, v in seg_buf.items() if k in required_keys}
 
     while curr_interact_count < interacts_total and not callback_exit:
         seg = roller.multi_step(nstep)
@@ -305,6 +303,7 @@ def learn(
             if curr_iteration < len(seg_buf):
                 # just reuse buffer
                 seg_buf[curr_iteration] = seg_to_store
+                print(f"Expanded buffer to size {len(seg_buf)}")
             else:
                 seg_buf.append(seg_to_store)
 

@@ -78,7 +78,7 @@ class PhasicValueModel(PhasicModel):
         obtype,
         actype,
         enc_fn,
-        vtarget_mode="rollout", # [rollout|sleep|vtrace]
+        vtarget_mode="rollout", # [rollout|vtrace]
         arch="dual",  # shared, detach, dual
     ):
         super().__init__()

@@ -49,7 +49,7 @@ class Job():
     def job_folder(self):
         return f"./run/{self.experiment}/{self.job_name}"
 
-    def run(self, device:str):
+    def run(self, device: str):
         """
         Executes the job
         """
@@ -57,8 +57,7 @@ class Job():
         # 1. copy files to experiment folder for reference (if they are not already there)
         # assuming linux here...
         if not os.path.exists(f"{self.experiment_folder}/train.py"):
-            print("Copying source files...")
-            os.makedirs(self.experiment_folder, exist_ok=True)
+            print(f"Making experiment folder {self.experiment_folder} and copying source files...")
             os.system(f"cp train.py {self.experiment_folder}/")
             os.system(f"cp -r phasic {self.experiment_folder}/")
 
@@ -76,9 +75,10 @@ class Job():
         print(f"Running: {command_str}")
 
         # log parameters
-        with open(f'params.txt', 'w') as f:
+        os.makedirs(self.job_name, exist_ok=True)
+        with open(f'{self.job_name}/params.txt', 'w') as f:
             f.write(command_str)
-        with open(f'host.txt', 'w') as f:
+        with open(f'{self.job_name}/host.txt', 'w') as f:
             import socket
             f.write(socket.gethostname())
 
@@ -156,25 +156,46 @@ if __name__ == "__main__":
             shuffle_time=True,
             ),
 
-        # Job('q3b', "vtr_1133_slow",
-        #     UPDATED_PPG_ARGS,
-        #     n_epoch_pi=1,
-        #     n_epoch_vf=3,
-        #     n_aux_epoch_pi=3,
-        #     n_aux_epoch_vf=1,
-        #     aux_lr=2.5e-4,
-        #     vtarget_mode='vtrace',
-        #     shuffle_time=True,
-        #     ),
+        Job('q3b', "vtr_1133_slow",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=3,
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=1,
+            aux_lr=2.5e-4,
+            vtarget_mode='vtrace',
+            shuffle_time=True,
+            ),
 
         Job('q3b', "mpg_1430",
             UPDATED_PPG_ARGS,
             n_epoch_pi=1,
-            n_epoch_vf=2, # 1 would be fair.. but lets try 2...
+            n_epoch_vf=1, # we get 4x for this
             n_aux_epoch_pi=3,
             n_aux_epoch_vf=0,
             vtarget_mode='rollout',
             v_mixing=True,
+            shuffle_time=True,
+            ),
+
+        # just want to check new code on a standard control run
+        Job('q3b', "ppg_1133",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=1,
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=3,
+            vtarget_mode='rollout',
+            shuffle_time=True,
+            ),
+
+        Job('q3b', "vtr_1133",
+            UPDATED_PPG_ARGS,
+            n_epoch_pi=1,
+            n_epoch_vf=1,
+            n_aux_epoch_pi=3,
+            n_aux_epoch_vf=3,
+            vtarget_mode='vtrace',
             shuffle_time=True,
             ),
 
